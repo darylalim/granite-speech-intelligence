@@ -1,6 +1,6 @@
 [project]
 name = "granite-speech-intelligence"
-version = "0.14.0"
+version = "0.15.0"
 description = "Streamlit application for English speech transcription using IBM Granite Speech 5.0 TurboCTC on Apple Silicon with MLX."
 requires-python = ">=3.12"
 license = "Apache-2.0"
