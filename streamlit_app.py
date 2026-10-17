@@ -777,7 +777,7 @@ def _render_result_card(result: PipelineResult, stem: str) -> None:
 
 def main() -> None:
     st.set_page_config(
-        page_title="Granite Speech Studio",
+        page_title="Granite Speech Intelligence",
         page_icon=":material/graphic_eq:",
         layout="wide",
     )
@@ -810,7 +810,7 @@ def main() -> None:
             "· English only]"
         )
 
-    st.title("Granite Speech Studio")
+    st.title("Granite Speech Intelligence")
 
     # One grid in every state — input and source on the left, output on the
     # right — so nothing moves when a file lands or a transcript appears.

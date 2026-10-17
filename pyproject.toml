@@ -1,5 +1,5 @@
 [project]
-name = "granite-speech-studio"
+name = "granite-speech-intelligence"
 version = "0.14.0"
 description = "Streamlit application for English speech transcription using IBM Granite Speech 5.0 TurboCTC on Apple Silicon with MLX."
 requires-python = ">=3.12"

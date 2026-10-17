@@ -214,7 +214,7 @@ def test_default_state() -> None:
     controls (source language, task pills, keywords) anywhere in the tree."""
     at = _app().run()
     assert not at.exception
-    assert at.title[0].value == "Granite Speech Studio"
+    assert at.title[0].value == "Granite Speech Intelligence"
     assert len(at.segmented_control) == 0
     assert len(at.pills) == 0
     assert len(at.multiselect) == 0
@@ -236,7 +236,7 @@ def test_page_config_is_wide() -> None:
         at = _app().run()
     assert not at.exception
     page_config.assert_called_once_with(
-        page_title="Granite Speech Studio",
+        page_title="Granite Speech Intelligence",
         page_icon=":material/graphic_eq:",
         layout="wide",
     )
@@ -267,7 +267,7 @@ def test_sidebar_holds_settings_and_app_info_only() -> None:
     assert len(at.main.get("audio_input")) == 1
     assert [b.label for b in at.main.button] == ["Transcribe"]
     assert len(at.main.toggle) == 0
-    assert [t.value for t in at.main.title] == ["Granite Speech Studio"]
+    assert [t.value for t in at.main.title] == ["Granite Speech Intelligence"]
 
 
 def test_empty_state_keeps_the_grid() -> None:

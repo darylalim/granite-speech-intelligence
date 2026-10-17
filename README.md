@@ -1,13 +1,13 @@
-# Granite Speech Studio
+# Granite Speech Intelligence
 
-[![CI](https://github.com/darylalim/granite-speech-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/darylalim/granite-speech-studio/actions/workflows/ci.yml)
+[![CI](https://github.com/darylalim/granite-speech-intelligence/actions/workflows/ci.yml/badge.svg)](https://github.com/darylalim/granite-speech-intelligence/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 
 Streamlit application for English speech transcription using IBM Granite Speech 5.0 TurboCTC on Apple Silicon with MLX.
 
 <p align="center">
-  <img src="docs/screenshot-dark.png" alt="Granite Speech Studio in dark mode, showing a timestamped transcription of the sample clip" width="70%">
+  <img src="docs/screenshot-dark.png" alt="Granite Speech Intelligence in dark mode, showing a timestamped transcription of the sample clip" width="70%">
 </p>
 <p align="center"><em>Timestamped transcription of the sample clip, in dark mode.</em></p>
 
