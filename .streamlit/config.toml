@@ -18,6 +18,15 @@
 
 [server]
 maxUploadSize = 500
+# Local-only. Unset, the server listens on every interface (it logged
+# "started on :::8599" and printed a Network URL), so anyone on the same
+# Wi-Fi could upload files for FFmpeg to parse and run the models.
+address = "localhost"
+
+# Streamlit's own usage statistics default to on; an app whose promise is
+# that nothing leaves the machine should not phone home.
+[browser]
+gatherUsageStats = false
 
 # Mode-agnostic. The accent is one value because the band where white text
 # reaches 4.5:1 on it does not depend on the surface it sits on.
