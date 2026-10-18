@@ -1,6 +1,6 @@
 # Plan: transcript analysis with Granite 4.2 8B
 
-Status: **draft; Track A started** (A1–A3 done in the working tree, uncommitted, as of 2026-10-17; see Order of work). Written 2026-10-17 for a later implementation session. Delete this file (or move it under `docs/`) once the work lands; CLAUDE.md is where the lasting record goes.
+Status: **draft; Track A started** (A1–A3 committed on 2026-10-17 as 4001f01, 7ead012 and 7c93564; next is A4. See Order of work). Written 2026-10-17 for a later implementation session. Delete this file (or move it under `docs/`) once the work lands; CLAUDE.md is where the lasting record goes.
 
 ## Order of work
 
@@ -10,9 +10,9 @@ Two tracks. **Track A** fixes the app as it ships today and doesn't depend on th
 
 | # | Commit | Done when |
 |---|---|---|
-| A1 | `fix(ui): serve on localhost only and disable usage stats` (`.streamlit/config.toml`, plus CLAUDE.md's Configuration note) | **Done, uncommitted.** Verified: the server listens on `127.0.0.1:8599` only, and the LAN address refuses connections. Remaining: the config test for both keys (Security, Tests). |
-| A2 | `chore: ignore model weights and local env files` (`.gitignore`) | **Done, uncommitted.** `git check-ignore` confirms each pattern, and no tracked file is affected. |
-| A3 | `docs: reword project description` (`pyproject.toml` + `README.md`) | **Done, uncommitted.** Matches the GitHub description, which is already live; `uv lock --check` passes. |
+| A1 | `fix(ui): serve on localhost only and disable usage stats` (`.streamlit/config.toml`, plus CLAUDE.md's Configuration note) | **Done (4001f01).** Verified: the server listens on `127.0.0.1:8599` only, and the LAN address refuses connections. Remaining: the config test for both keys (Security, Tests). |
+| A2 | `chore: ignore model weights and local env files` (`.gitignore`) | **Done (7ead012).** `git check-ignore` confirms each pattern, and no tracked file is affected. |
+| A3 | `docs: reword project description` (`pyproject.toml` + `README.md`) | **Done (7c93564).** Matches the GitHub description, which is already live; `uv lock --check` passes. |
 | A4 | `fix(ui): keep the accepted formats readable at laptop widths` (Layout, change 5) | A caption built from `SUPPORTED_FORMATS`/`VIDEO_FORMATS` is pinned by an AppTest, the 1470 px frame shows every format, and CLAUDE.md's "the dropzone lists the extensions itself" line is corrected. |
 | A5 | `chore(deps): upgrade locked dependencies` (Step 0) | Every new package is reviewed and noted in the commit body, all four checks pass, the real-weights tests ran rather than skipped, the app was checked by hand in both themes, and the CLAUDE.md version notes are updated. |
 | A6 | `feat(ui): cap the layout width on large displays` (Layout, change 1) | **Must come after A4.** The frame measurements are re-run before and after, the wrapper width is pinned by an AppTest, and the tests that walk `at.main` are updated. |
