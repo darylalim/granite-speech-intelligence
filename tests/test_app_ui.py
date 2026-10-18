@@ -796,3 +796,16 @@ def test_config_has_no_invalid_options(app_config: dict) -> None:
     assert "theme.primaryColor" in valid  # registry is populated
     invalid = [path for path in _option_paths(app_config, valid) if path not in valid]
     assert invalid == [], f"invalid config options: {invalid}"
+
+
+def test_config_serves_locally_without_usage_stats(app_config: dict) -> None:
+    """The server stays on localhost and Streamlit's usage statistics stay off.
+    Unset, server.address listens on every interface (verified 2026-10-17: it
+    logged "started on :::8599" with a Network URL), so anyone on the same
+    Wi-Fi could upload files for FFmpeg to parse and run the models; and
+    gatherUsageStats defaults to on, in an app whose design is that nothing
+    leaves the machine. test_config_has_no_invalid_options catches a typo'd
+    key but not a deleted or changed one, which is what this pins — by value,
+    with .get so a missing table reads as the assertion that failed."""
+    assert app_config.get("server", {}).get("address") == "localhost"
+    assert app_config.get("browser", {}).get("gatherUsageStats") is False

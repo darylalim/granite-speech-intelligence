@@ -10,7 +10,7 @@ Two tracks. **Track A** fixes the app as it ships today and doesn't depend on th
 
 | # | Commit | Done when |
 |---|---|---|
-| A1 | `fix(ui): serve on localhost only and disable usage stats` (`.streamlit/config.toml`, plus CLAUDE.md's Configuration note) | **Done (4001f01).** Verified: the server listens on `127.0.0.1:8599` only, and the LAN address refuses connections. Remaining: the config test for both keys (Security, Tests). |
+| A1 | `fix(ui): serve on localhost only and disable usage stats` (`.streamlit/config.toml`, plus CLAUDE.md's Configuration note) | **Done (4001f01).** Verified: the server listens on `127.0.0.1:8599` only, and the LAN address refuses connections. Both keys are pinned by `test_config_serves_locally_without_usage_stats`, committed separately. |
 | A2 | `chore: ignore model weights and local env files` (`.gitignore`) | **Done (7ead012).** `git check-ignore` confirms each pattern, and no tracked file is affected. |
 | A3 | `docs: reword project description` (`pyproject.toml` + `README.md`) | **Done (7c93564).** Matches the GitHub description, which is already live; `uv lock --check` passes. |
 | A4 | `fix(ui): keep the accepted formats readable at laptop widths` (Layout, change 5) | A caption built from `SUPPORTED_FORMATS`/`VIDEO_FORMATS` is pinned by an AppTest, the 1470 px frame shows every format, and CLAUDE.md's "the dropzone lists the extensions itself" line is corrected. |
