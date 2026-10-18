@@ -12,4 +12,10 @@ dist/
 !.claude/hooks/
 .venv/
 .env
-.env.*.local
+.env.*
+!.env.example
+# Model weights belong in the HF cache, never the repo
+*.safetensors
+*.gguf
+*.npz
+mlx_model/
