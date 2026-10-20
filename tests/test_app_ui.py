@@ -42,9 +42,11 @@ from streamlit.proto.Common_pb2 import FileURLs
 # type the app actually receives rather than a duck.
 from streamlit.runtime.uploaded_file_manager import UploadedFile, UploadedFileRec
 from streamlit.testing.v1 import AppTest
+from streamlit.testing.v1.element_tree import Block as TreeBlock
 
 from streamlit_app import (
     ACCEPTED_FORMATS_CAPTION,
+    LAYOUT_MAX_WIDTH_PX,
     MODEL_ID,
     MODEL_REVISION,
     TRANSCRIPT_MAX_WIDTH_PX,
@@ -70,6 +72,15 @@ def app_config() -> dict:
 
 def _app() -> AppTest:
     return AppTest.from_file(str(APP), default_timeout=60)
+
+
+def _page(at: AppTest) -> TreeBlock:
+    """The width-capped container holding the title and grid: main's one
+    child is the centring container, and the page is its one child."""
+    (outer,) = at.main.children.values()
+    (page,) = outer.children.values()
+    assert isinstance(page, TreeBlock)
+    return page
 
 
 @pytest.fixture(autouse=True)
@@ -343,9 +354,27 @@ def test_sidebar_model_line_names_the_loaded_model() -> None:
     # By tree shape, not by element type: a description put back under the
     # title as *any* element would pass a per-type count somewhere, and it
     # would sit outside both columns, so nothing else on the page sees it.
-    title, grid = at.main.children.values()
+    title, grid = _page(at).children.values()
     assert title.type == "title"
     assert len(grid.columns) == 2
+
+
+def test_layout_is_capped_and_centred() -> None:
+    """Main holds one centring container whose one child is the capped page,
+    and everything — title and grid — is inside the cap. Past it the columns
+    would keep widening while the transcript card stops at 720px, leaving a
+    wide empty gap beside it on large displays."""
+    at = _app().run()
+    assert not at.exception
+    (outer,) = at.main.children.values()
+    # In a vertical container, horizontal_alignment is the cross axis: align.
+    assert outer.proto.flex_container.align == Block.FlexContainer.Align.ALIGN_CENTER
+    page = _page(at)
+    assert page.proto.width_config.pixel_width == LAYOUT_MAX_WIDTH_PX
+    # Both caps hold, and the reading measure sits inside the layout one.
+    assert TRANSCRIPT_MAX_WIDTH_PX < LAYOUT_MAX_WIDTH_PX
+    assert len(page.title) == 1
+    assert len(page.columns) == 2
 
 
 def test_faux_labels_are_bold() -> None:

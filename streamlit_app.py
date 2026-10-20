@@ -142,6 +142,15 @@ MIN_SEGMENT_DURATION_S = 20.0
 # larger video and a longer audio scrubber are worth having.
 TRANSCRIPT_MAX_WIDTH_PX = 720
 
+# Cap on the title and grid together, centred in the main area. Past it the
+# [2, 3] columns would keep widening while the transcript card stops at
+# TRANSCRIPT_MAX_WIDTH_PX, leaving 700-1200px of empty column beside the card
+# on 2560-3440px displays. At 1280 the transcript column is ~760px, so the
+# card nearly fills it. A cap, not a width: below 1280px of main area (every
+# laptop with the sidebar open) it does nothing. Not layout="centered", whose
+# ~736px is too narrow for two columns.
+LAYOUT_MAX_WIDTH_PX = 1280
+
 
 class PipelineResult(TypedDict):
     transcript: str
@@ -822,11 +831,14 @@ def main() -> None:
             "· English only]"
         )
 
-    st.title("Granite Speech Intelligence")
+    page = st.container(horizontal_alignment="center").container(
+        width=LAYOUT_MAX_WIDTH_PX
+    )
+    page.title("Granite Speech Intelligence")
 
     # One grid in every state — input and source on the left, output on the
     # right — so nothing moves when a file lands or a transcript appears.
-    input_col, transcript_col = st.columns([2, 3], gap="medium")
+    input_col, transcript_col = page.columns([2, 3], gap="medium")
     with input_col:
         upload_tab, record_tab = st.tabs(["Upload", "Record"])
         with upload_tab:
