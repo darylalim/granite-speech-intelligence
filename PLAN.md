@@ -1,6 +1,6 @@
 # Plan: transcript analysis with Granite 4.2 8B
 
-Status: **draft; Track A started** (A1–A3 committed on 2026-10-17 as 4001f01, 7ead012 and 7c93564, A4 on 2026-10-20 as 2d6ac40; next is A5. See Order of work). Written 2026-10-17 for a later implementation session. Delete this file (or move it under `docs/`) once the work lands; CLAUDE.md is where the lasting record goes.
+Status: **draft; Track A started** (A1–A3 committed on 2026-10-17 as 4001f01, 7ead012 and 7c93564, A4 and A5 on 2026-10-20 as 2d6ac40 and f890915; next is A6. See Order of work). Written 2026-10-17 for a later implementation session. Delete this file (or move it under `docs/`) once the work lands; CLAUDE.md is where the lasting record goes.
 
 ## Order of work
 
@@ -14,7 +14,7 @@ Two tracks. **Track A** fixes the app as it ships today and doesn't depend on th
 | A2 | `chore: ignore model weights and local env files` (`.gitignore`) | **Done (7ead012).** `git check-ignore` confirms each pattern, and no tracked file is affected. |
 | A3 | `docs: reword project description` (`pyproject.toml` + `README.md`) | **Done (7c93564).** Matches the GitHub description, which is already live; `uv lock --check` passes. |
 | A4 | `fix(ui): keep the accepted formats readable at laptop widths` (Layout, change 5) | **Done (2d6ac40).** `ACCEPTED_FORMATS_CAPTION` is pinned by `test_accepted_formats_are_listed_under_the_dropzone`; rendered at 1470 and 1024 px (sidebar open) in both themes, every format shows; CLAUDE.md corrected. |
-| A5 | `chore(deps): upgrade locked dependencies` (Step 0) | Every new package is reviewed and noted in the commit body, all four checks pass, the real-weights tests ran rather than skipped, the app was checked by hand in both themes, and the CLAUDE.md version notes are updated. |
+| A5 | `chore(deps): upgrade locked dependencies` (Step 0) | **Done (f890915).** av 19 forced the `av>=19.0.0` floor (`metadata_errors=` removed); silero-vad moved to 6.2.3 (its pin's condition met, `.jit` byte-identical); mlx 0.32.4 flipped the fixture's VAD-path `libvox` to `librivox`, matched by the reference. Originally: every new package is reviewed and noted in the commit body, all four checks pass, the real-weights tests ran rather than skipped, the app was checked by hand in both themes, and the CLAUDE.md version notes are updated. |
 | A6 | `feat(ui): cap the layout width on large displays` (Layout, change 1) | **Must come after A4.** The frame measurements are re-run before and after, the wrapper width is pinned by an AppTest, and the tests that walk `at.main` are updated. |
 
 A4 and A6 can be one session; A5 should be its own, because a dependency break has to be attributable to the upgrade alone.
