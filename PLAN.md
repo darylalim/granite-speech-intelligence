@@ -1,6 +1,6 @@
 # Plan: transcript analysis with Granite 4.2 8B
 
-Status: **draft; Track A started** (A1–A3 committed on 2026-10-17 as 4001f01, 7ead012 and 7c93564, A4 and A5 on 2026-10-20 as 2d6ac40 and f890915, A6 the same day as 704d9d5; Track A is complete and next is B1. See Order of work). Written 2026-10-17 for a later implementation session. Delete this file (or move it under `docs/`) once the work lands; CLAUDE.md is where the lasting record goes.
+Status: **draft; Track B started** (A1–A3 committed on 2026-10-17 as 4001f01, 7ead012 and 7c93564, A4 and A5 on 2026-10-20 as 2d6ac40 and f890915, A6 the same day as 704d9d5, B1 the same day as 553d0f7; Track A is complete and next is B2. See Order of work). Written 2026-10-17 for a later implementation session. Delete this file (or move it under `docs/`) once the work lands; CLAUDE.md is where the lasting record goes.
 
 ## Order of work
 
@@ -23,7 +23,7 @@ A4 and A6 can be one session; A5 should be its own, because a dependency break h
 
 | # | Work | Done when |
 |---|---|---|
-| B1 | `chore(deps): add mlx-lm for transcript analysis` | `mlx-lm` is in the lock, its new dependencies are reviewed (Security, rule 5), and the four checks pass. |
+| B1 | `chore(deps): add mlx-lm for transcript analysis` | **Done (553d0f7).** 0.32.2 landed, the release the API notes were written against, so they stand. The lock gained `mlx-lm` alone: its seven requirements were already there via `mlx-audio`, so there was nothing new to review. Originally: `mlx-lm` is in the lock, its new dependencies are reviewed (Security, rule 5), and the four checks pass. |
 | B2 | Phase 0 spike, in the scratchpad (steps 2–10; step 1's `uv add` is B1, and step 4's evaluation run is B3) | Every other Phase 0 figure and every Performance budget has a measured value, written into CLAUDE.md. |
 | B3 | `test(pipeline): add transcript analysis evaluation` (Evaluation; Phase 0 step 4's second half) | The labels and split are committed, and held-out scores exist on both human and ASR transcripts for the 8B, and for the 3B if the 8B missed a budget in B2. |
 | B4 | **Decision point** (end of Phase 0) | 8B vs 3B, `MAX_ANALYSIS_TOKENS`, Phase 3 yes/no, the cache-keeping and lock decisions (Performance, items 3 and 6), and the PyAV resample question are each written into this file with the measured reason. The download decision (Phase 1) is made here too. |
