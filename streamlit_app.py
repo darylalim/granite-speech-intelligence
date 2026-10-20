@@ -69,6 +69,17 @@ SUPPORTED_FORMATS = [
     "mkv",
 ]
 VIDEO_FORMATS = {"mp4", "mov", "webm", "mkv"}
+# The dropzone prints the extensions on one line and clips it to its own width:
+# on a 1470px laptop with the sidebar open it shows "WAV, FLAC, M4A, MP3, O…"
+# and none of the video containers (measured 2026-10-17). A caption wraps
+# instead, and is built from the lists so it cannot drift from what the
+# uploader accepts.
+ACCEPTED_FORMATS_CAPTION = (
+    "Audio: "
+    + ", ".join(f.upper() for f in SUPPORTED_FORMATS if f not in VIDEO_FORMATS)
+    + " · Video: "
+    + ", ".join(f.upper() for f in SUPPORTED_FORMATS if f in VIDEO_FORMATS)
+)
 SAMPLE_RATE = 16000
 # Shortest clip generate() decodes. The encoder needs 4 stacked mel frames —
 # 7 x 160-sample hops = 1120 samples at 16 kHz, 70 ms: two stride-2
@@ -819,13 +830,15 @@ def main() -> None:
         upload_tab, record_tab = st.tabs(["Upload", "Record"])
         with upload_tab:
             # No help= tooltip: the label is collapsed, so there is nothing for
-            # it to sit beside, and the dropzone lists the accepted extensions
-            # itself.
+            # it to sit beside, and a tooltip is where a keyboard or
+            # screen-reader user may never reach. The accepted formats go in
+            # the caption under the dropzone, which clips its own list.
             uploaded = st.file_uploader(
                 "Upload an audio or video file",
                 type=SUPPORTED_FORMATS,
                 label_visibility="collapsed",
             )
+            st.caption(ACCEPTED_FORMATS_CAPTION)
         with record_tab:
             recorded = st.audio_input("Record audio", label_visibility="collapsed")
         source = select_source(

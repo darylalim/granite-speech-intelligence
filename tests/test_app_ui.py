@@ -43,7 +43,12 @@ from streamlit.proto.Common_pb2 import FileURLs
 from streamlit.runtime.uploaded_file_manager import UploadedFile, UploadedFileRec
 from streamlit.testing.v1 import AppTest
 
-from streamlit_app import MODEL_ID, MODEL_REVISION, TRANSCRIPT_MAX_WIDTH_PX
+from streamlit_app import (
+    ACCEPTED_FORMATS_CAPTION,
+    MODEL_ID,
+    MODEL_REVISION,
+    TRANSCRIPT_MAX_WIDTH_PX,
+)
 
 APP = Path(__file__).parent.parent / "streamlit_app.py"
 AUDIO_DIR = Path(__file__).parent / "data" / "audio"
@@ -203,7 +208,10 @@ def _assert_single_result_card(at: AppTest) -> None:
     assert len(header.download_button) == 1
     assert len(card.text) == 1
     assert len(slot.caption) == 0
-    assert [c.value for c in input_col.caption] == ["sample_10s.wav"]
+    assert [c.value for c in input_col.caption] == [
+        ACCEPTED_FORMATS_CAPTION,
+        "sample_10s.wav",
+    ]
     assert len(input_col.subheader) == 0
     assert len(input_col.download_button) == 0
 
@@ -282,11 +290,32 @@ def test_empty_state_keeps_the_grid() -> None:
     assert len(input_col.file_uploader) == 1
     assert [b.disabled for b in input_col.button] == [True]
     assert len(input_col.get("audio")) == 0  # no player...
-    assert len(input_col.caption) == 0  # ...so no filename under it
+    # ...so no filename under it: only the formats line.
+    assert [c.value for c in input_col.caption] == [ACCEPTED_FORMATS_CAPTION]
     (slot,) = transcript.container
     assert slot.proto.width_config.pixel_width == TRANSCRIPT_MAX_WIDTH_PX
     (hint,) = slot.caption
     assert "Upload or record" in hint.value
+
+
+def test_accepted_formats_are_listed_under_the_dropzone() -> None:
+    """The dropzone prints the extensions on one line clipped to its width,
+    so at laptop widths the video containers never show; a caption directly
+    under it wraps. Pinned by value as well as by constant: the constant is
+    derived from SUPPORTED_FORMATS and VIDEO_FORMATS, and a derivation that
+    dropped a format or put one under the wrong heading would still equal
+    itself."""
+    at = _app().run()
+    assert not at.exception
+    assert ACCEPTED_FORMATS_CAPTION == (
+        "Audio: WAV, FLAC, M4A, MP3, OGG, AAC · Video: MP4, MOV, WEBM, MKV"
+    )
+    upload_tab, _ = at.columns[0].tabs
+    assert [e.type for e in upload_tab.children.values()] == [
+        "file_uploader",
+        "caption",
+    ]
+    assert upload_tab.caption[0].value == ACCEPTED_FORMATS_CAPTION
 
 
 def test_sidebar_model_line_names_the_loaded_model() -> None:
@@ -353,7 +382,10 @@ def test_run_button_gating(audio_bytes: bytes) -> None:
     # and the filename under it, both in the input column.
     assert len(input_col.get("audio")) == 1
     assert len(transcript.get("audio")) == 0
-    assert [c.value for c in input_col.caption] == ["sample_10s.wav"]
+    assert [c.value for c in input_col.caption] == [
+        ACCEPTED_FORMATS_CAPTION,
+        "sample_10s.wav",
+    ]
     # Before a run the slot is the only container in the transcript column,
     # and the cap is on it — TestRenderResultCard pins that the card itself
     # carries no width, so this is the only place the constant is observed.
@@ -380,7 +412,10 @@ def test_vad_off_long_audio_gates_run(
     assert not at.exception
     assert at.button(key="transcribe").disabled is blocked
     input_col, transcript = at.columns
-    assert [c.value for c in input_col.caption] == ["long.wav"]
+    assert [c.value for c in input_col.caption] == [
+        ACCEPTED_FORMATS_CAPTION,
+        "long.wav",
+    ]
     if blocked:
         # Beside the button it disables, not under the sidebar toggle that
         # clears it: the sidebar can be collapsed, the button cannot.
@@ -428,13 +463,19 @@ def test_the_most_recently_touched_input_is_the_source(
         "streamlit.audio_input", return_value=UploadedFile(rec, FileURLs())
     ) as recorder:
         at = _app().run()
-        assert [c.value for c in at.columns[0].caption] == ["Recorded audio"]
+        assert [c.value for c in at.columns[0].caption] == [
+            ACCEPTED_FORMATS_CAPTION,
+            "Recorded audio",
+        ]
 
         # An upload lands after the recording and takes over.
         at.file_uploader[0].set_value(("sample_10s.wav", audio_bytes, "audio/wav"))
         at.run()
         assert not at.exception
-        assert [c.value for c in at.columns[0].caption] == ["sample_10s.wav"]
+        assert [c.value for c in at.columns[0].caption] == [
+            ACCEPTED_FORMATS_CAPTION,
+            "sample_10s.wav",
+        ]
 
         # A NEW recording then takes it back — the case the old `or` lost.
         # A fresh file_id is what makes it new; the widget is otherwise equal.
@@ -442,21 +483,33 @@ def test_the_most_recently_touched_input_is_the_source(
         recorder.return_value = UploadedFile(later, FileURLs())
         at.run()
         assert not at.exception
-        assert [c.value for c in at.columns[0].caption] == ["Recorded audio"]
+        assert [c.value for c in at.columns[0].caption] == [
+            ACCEPTED_FORMATS_CAPTION,
+            "Recorded audio",
+        ]
 
         # A plain rerun changes nothing, so the choice stands.
         at.run()
-        assert [c.value for c in at.columns[0].caption] == ["Recorded audio"]
+        assert [c.value for c in at.columns[0].caption] == [
+            ACCEPTED_FORMATS_CAPTION,
+            "Recorded audio",
+        ]
 
         # Clearing the inactive upload leaves the recording alone; clearing
         # the active source falls back to whatever is left.
         at.file_uploader[0].set_value(("sample_10s.wav", audio_bytes, "audio/wav"))
         at.run()
-        assert [c.value for c in at.columns[0].caption] == ["sample_10s.wav"]
+        assert [c.value for c in at.columns[0].caption] == [
+            ACCEPTED_FORMATS_CAPTION,
+            "sample_10s.wav",
+        ]
         at.file_uploader[0].set_value(None)
         at.run()
     assert not at.exception
-    assert [c.value for c in at.columns[0].caption] == ["Recorded audio"]
+    assert [c.value for c in at.columns[0].caption] == [
+        ACCEPTED_FORMATS_CAPTION,
+        "Recorded audio",
+    ]
 
 
 def test_the_recording_supplies_the_download_stem_when_it_is_the_source(
