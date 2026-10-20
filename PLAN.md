@@ -129,17 +129,17 @@ Do this in a scratch script under the session scratchpad, not in the repo. Weigh
    - Once 8B vs 3B is decided, delete the rejected model's cache entry, and record what the chosen one actually occupies on disk.
    - Find out what a download that runs out of disk raises from `mlx_lm.load`. Is it an `OSError` with `errno.ENOSPC`, does `huggingface_hub` warn first, and does a partial file stay behind? Phase 1's error handling depends on the answer.
    - Likewise, record what `mlx_lm.load` raises on first use with the network off (model not cached), so Phase 1 can map it to the one-line "isn't downloaded yet" error.
-10. **Generation details** Phase 1 depends on:
-    - Confirm that `<|im_end|>` is in `tokenizer.eos_token_ids`, and that a summary run with the EOS stop ends there with nothing trailing.
-    - Measure tokens per word on the tiled transcript from step 2, which sets the length pre-check's estimate.
-    - Check whether `generate_step`'s `prompt_progress_callback` can drive the prefill progress bar, i.e. whether calling `st.*` from it works and lets a rerun stop the prefill. If so, it replaces the hand-written chunk loop in `prefill_transcript`.
-    - Confirm `cache[0].offset` after a summary is one token past what the loop consumed, or not, and that the trim leaves it at exactly `len(prefix_ids)`.
 9. **Memory handover, sharing and concurrency** (see Performance).
    - **MLX's buffer cache:** after a TurboCTC transcription, record `mx.get_active_memory()`, `mx.get_cache_memory()` and `mx.get_peak_memory()`. Then try `mx.clear_cache()` (or `mx.set_cache_limit(...)`) before the LLM loads and record the difference. If clearing it brings the step 3 peak under budget, that's cheaper than evicting the speech model.
    - **Shared prefix:** time a full analysis (summary + 10 questions) on a 30-minute transcript with one shared prefill, against separate prefills for the summary and the board. Confirm, as in step 5, that the questions' logits after a summary and its trim match those from a fresh prefill.
    - **Keeping the cache between reruns:** record the size of the transcript's cache at 8K and 16K tokens. This decides whether item 3 in Performance is worth its memory.
    - **Two tabs at once:** start an analysis in two browser tabs together. Record whether it errors, the peak memory and the timing. This decides whether the inference lock is needed (Performance, item 6).
    - **Cold vs warm:** time the first analysis after the model loads against the second. Report the budgets as warm figures, and give the cold cost alongside.
+10. **Generation details** Phase 1 depends on:
+    - Confirm that `<|im_end|>` is in `tokenizer.eos_token_ids`, and that a summary run with the EOS stop ends there with nothing trailing.
+    - Measure tokens per word on the tiled transcript from step 2, which sets the length pre-check's estimate.
+    - Check whether `generate_step`'s `prompt_progress_callback` can drive the prefill progress bar, i.e. whether calling `st.*` from it works and lets a rerun stop the prefill. If so, it replaces the hand-written chunk loop in `prefill_transcript`.
+    - Confirm `cache[0].offset` after a summary is one token past what the loop consumed, or not, and that the trim leaves it at exactly `len(prefix_ids)`.
 
 **Decision point after Phase 0:**
 - Whether each performance budget is met (see Performance). A missed budget is evidence for 3B, `kv_bits=8` or a lower `MAX_ANALYSIS_TOKENS`, in that order of preference. Write down which one is used and why.
