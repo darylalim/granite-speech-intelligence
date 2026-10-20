@@ -7,18 +7,19 @@ license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Daryl Lim" }]
 dependencies = [
-    "av>=18.1.0",
+    # 19.0 decodes container/stream tag text with "surrogateescape", which
+    # cannot raise; 18.x decoded strictly, so an ANSI RIFF INFO tag failed the
+    # open, and 19 removed the metadata_errors= switch that worked around it.
+    "av>=19.0.0",
     "mlx-audio>=0.5.1",
     # Pinned: this checkpoint is the other half of the bit-exact pair that
-    # MLX_VAD_REVISION freezes, and 6.1/5.x ship different weights. 6.2.2 (a)
-    # declares `torchaudio<2.10` — its only torchaudio users are its own
-    # read_audio/save_audio, which this app never calls, and inheriting the
-    # bound drags torchaudio to 2.9.1 and torch with it (2.14 -> 2.9.1) — and
-    # (b) imports onnxruntime at package import while declaring it only as an
-    # extra, so `import silero_vad` fails here. Its .jit checkpoint is
-    # byte-identical to 6.2.1's. Move the pin once a release drops the bound
-    # AND stops importing onnxruntime eagerly.
-    "silero-vad==6.2.1",
+    # MLX_VAD_REVISION freezes, and 6.1/5.x ship different weights; the .jit
+    # is byte-identical across 6.2.1-6.2.3. 6.2.2 was skipped: it declared
+    # `torchaudio<2.10` (dragging torch 2.14 -> 2.9.1) and imported
+    # onnxruntime at package import. 6.2.3 moved torchaudio to the `audio`
+    # extra and imports onnxruntime lazily. Exact, not a floor, so
+    # `uv lock --upgrade` never picks up a release that reintroduces either.
+    "silero-vad==6.2.3",
     # st.space (the stretch spacer that floats the toggle and the download
     # button right) landed in 1.51.0; everything else the layout uses —
     # horizontal containers, container/button width= — is 1.48.0.

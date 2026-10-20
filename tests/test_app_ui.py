@@ -24,7 +24,7 @@ instead of depending on iteration order.
 import io
 import tomllib
 import wave
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from fractions import Fraction
 from pathlib import Path
@@ -95,7 +95,7 @@ def speech_loader() -> Iterator[MagicMock]:
 
 
 @contextmanager
-def _header_duration(seconds: float) -> Iterator[MagicMock]:
+def _header_duration(seconds: float) -> Generator[MagicMock]:
     """Patch the shared `av.open` so audio_duration_seconds reads `seconds`
     from the (fake) stream header — no fixture is half an hour long. The
     stream's duration is in its own time base, which is how real containers
@@ -140,7 +140,7 @@ def _fixture_samples() -> int:
 
 
 @contextmanager
-def _offline_mlx_vad() -> Iterator[MagicMock]:
+def _offline_mlx_vad() -> Generator[MagicMock]:
     """Make the MLX VAD loader fail as it would with no cache and no network.
 
     load_vad_model then falls back to the PyTorch build bundled in the

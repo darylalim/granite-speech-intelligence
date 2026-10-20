@@ -98,10 +98,10 @@ def video_only_mp4() -> bytes:
 def latin1_tagged_wav(seconds: float = 1.0, rate: int = 16000) -> bytes:
     """A silent 16-bit mono WAV with a RIFF INFO comment in Latin-1, the way
     Windows and DAW tools write ANSI tags. FFmpeg's wav demuxer copies that
-    text into the metadata byte for byte, so with PyAV's default
-    metadata_errors="strict" the open itself raised UnicodeDecodeError before
-    a frame was read. Built tag-free first: sample_10s.wav already carries a
-    LIST/INFO chunk and FFmpeg keeps the *last* value it sees, so splicing a
+    text into the metadata byte for byte, so under PyAV 18's strict default
+    the open itself raised UnicodeDecodeError before a frame was read (19
+    decodes with "surrogateescape"). Built tag-free first: sample_10s.wav
+    already carries a LIST/INFO chunk and FFmpeg keeps the *last* value it sees, so splicing a
     tag ahead of that one would be shadowed and the test would pass without
     the fix."""
     buf = io.BytesIO()
@@ -899,8 +899,8 @@ class TestAudioDurationSeconds:
         assert audio_duration_seconds(make_upload(raw=video_only_mp4())) is None
 
     def test_latin1_tags_do_not_hide_the_duration(self) -> None:
-        # UnicodeDecodeError is a ValueError, so without metadata_errors=
-        # "replace" this returned None — and the long-audio gate went dark.
+        # UnicodeDecodeError is a ValueError, so a strict tag decode made this
+        # return None — and the long-audio gate went dark.
         duration = audio_duration_seconds(make_upload(raw=latin1_tagged_wav()))
         assert duration == pytest.approx(1.0)
 

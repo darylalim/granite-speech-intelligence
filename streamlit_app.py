@@ -509,19 +509,20 @@ def load_model(model_id: str, revision: str | None = None) -> Any:
 
 
 def _open_container(data: bytes) -> av.container.InputContainer:
-    """Open an upload for reading, with tag text decoded lossily.
+    """Open an upload for reading.
 
     `av.open` turns container *and* stream metadata into `str` at open time,
-    before a frame is read, and its default is `errors="strict"`. FFmpeg's wav
-    demuxer copies RIFF INFO and BWF `bext` text into those tags byte for
-    byte (only ID3 is transcoded), and Windows/DAW tools write them in ANSI,
-    so a perfectly decodable file raised UnicodeDecodeError on its artist
-    field alone — and, because UnicodeDecodeError is a ValueError,
-    `audio_duration_seconds` swallowed it into a silent None. Nothing here
-    reads a tag, so "replace" costs nothing. One helper rather than a kwarg
-    at each call site so the two opens cannot drift apart on it.
+    before a frame is read. FFmpeg's wav demuxer copies RIFF INFO and BWF
+    `bext` text into those tags byte for byte (only ID3 is transcoded), and
+    Windows/DAW tools write them in ANSI. PyAV 18 decoded them strictly by
+    default, so a perfectly decodable file raised UnicodeDecodeError on its
+    artist field alone — and, because UnicodeDecodeError is a ValueError,
+    `audio_duration_seconds` swallowed it into a silent None. PyAV 19 removed
+    the `metadata_errors=` switch this used to pass and always decodes with
+    "surrogateescape", which cannot raise; that is what the `av>=19` floor
+    holds. One helper so the two opens cannot drift apart.
     """
-    return av.open(io.BytesIO(data), mode="r", metadata_errors="replace")
+    return av.open(io.BytesIO(data), mode="r")
 
 
 def _best_audio_stream(
@@ -966,9 +967,7 @@ def main() -> None:
                     stem = Path(audio_file.name).stem
                 else:
                     # Local wall-clock is what a user expects in a filename.
-                    stem = datetime.now().strftime(  # noqa: DTZ005
-                        "recording_%Y%m%d_%H%M%S"
-                    )
+                    stem = datetime.now().strftime("recording_%Y%m%d_%H%M%S")
                 st.session_state.result_stem = stem
             except RuntimeError as e:
                 st.error(str(e), icon=":material/error:")
