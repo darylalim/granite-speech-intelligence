@@ -22,6 +22,12 @@ maxUploadSize = 500
 # "started on :::8599" and printed a Network URL), so anyone on the same
 # Wi-Fi could upload files for FFmpeg to parse and run the models.
 address = "localhost"
+# Reload-on-save is an editing convenience, and the watcher it needs probes
+# every loaded module: transformers' lazy loader answers by importing image
+# processors that need torchvision, which is not installed, and Streamlit
+# logged ~100 tracebacks per session. Developing? Pass
+# `--server.fileWatcherType auto` on the command line.
+fileWatcherType = "none"
 
 # Streamlit's own usage statistics default to on; an app whose promise is
 # that nothing leaves the machine should not phone home.
