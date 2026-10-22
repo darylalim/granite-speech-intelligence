@@ -20,8 +20,19 @@ from mlx_lm.generate import generate_step
 from mlx_lm.models.cache import make_prompt_cache, trim_prompt_cache
 from mlx_lm.sample_utils import make_sampler
 
-LLM_ID = "ibm-granite/granite-4.2-8b-q4-mlx"
-LLM_REVISION = "9047f073e46c527f70dade07bb55b1700d728e36"
+# The two candidates (PLAN.md, Model): the 8B is the plan's choice, the 3B the
+# fallback B3 scores because the 8B missed the full-analysis budget in B2.
+# Each is pinned to a full commit hash, for the reason MODEL_REVISION is.
+MODELS: dict[str, tuple[str, str]] = {
+    "8b": (
+        "ibm-granite/granite-4.2-8b-q4-mlx",
+        "9047f073e46c527f70dade07bb55b1700d728e36",
+    ),
+    "3b": (
+        "ibm-granite/granite-4.2-3b-q8-mlx",
+        "8e19ac6574124635eb8fbd06a15d05ebbfff82dd",
+    ),
+}
 PREFILL_STEP = 2048
 SUMMARY_MAX_TOKENS = 512
 
@@ -87,10 +98,11 @@ class ExcerptResult:
 
 
 class Analyzer:
-    def __init__(self, prompt: Prompt) -> None:
+    def __init__(self, prompt: Prompt, model: str = "8b") -> None:
         # Strict by default: mlx_lm.load passes no strict= and load_model's
         # default is True (confirmed by experiment in Phase 0).
-        loaded = load(LLM_ID, revision=LLM_REVISION)
+        repo, revision = MODELS[model]
+        loaded = load(repo, revision=revision)
         self.model, self.tokenizer = loaded[0], loaded[1]
         self.prompt = prompt
         self.yes_id, self.no_id = self._single_token("Yes"), self._single_token("No")

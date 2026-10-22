@@ -23,7 +23,7 @@ from pathlib import Path
 import mlx.core as mx
 
 from evals.ami import Meeting
-from evals.analysis import LLM_ID, LLM_REVISION, PROMPTS, Analyzer
+from evals.analysis import MODELS, PROMPTS, Analyzer
 from evals.metrics import brier, quantiles, reliability, roc_auc
 from evals.prepare_ami import EVALS_DIR, MANUAL_DIR, TRANSCRIPTS_DIR, load_labels
 
@@ -120,7 +120,7 @@ def rescore(path: Path, labels: dict) -> None:
                 if r["split"] == split
             ]
             report(
-                f"{split}/{source} ({saved['prompt']})",
+                f"{split}/{source} ({saved['model']}, {saved['prompt']})",
                 score(rows, questions),
                 questions,
             )
@@ -130,6 +130,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--split", choices=SPLITS, default="held")
     parser.add_argument("--prompt", choices=PROMPTS, default="plan")
+    parser.add_argument("--model", choices=MODELS, default="8b")
     parser.add_argument(
         "--rescore",
         type=Path,
@@ -147,7 +148,7 @@ def main() -> None:
     # The A7 limit: Phase 0 measured the 8B within budget only under it.
     mx.set_cache_limit(1 << 30)
     began = time.perf_counter()
-    analyzer = Analyzer(PROMPTS[args.prompt])
+    analyzer = Analyzer(PROMPTS[args.prompt], args.model)
     load_seconds = time.perf_counter() - began
 
     rows: dict[str, list[dict]] = {source: [] for source in SOURCES}
@@ -200,12 +201,12 @@ def main() -> None:
 
     RESULTS_DIR.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out = RESULTS_DIR / f"analysis_{args.split}_{args.prompt}_{stamp}.json"
+    out = RESULTS_DIR / f"analysis_{args.model}_{args.split}_{args.prompt}_{stamp}.json"
     out.write_text(
         json.dumps(
             {
-                "model": LLM_ID,
-                "revision": LLM_REVISION,
+                "model": MODELS[args.model][0],
+                "revision": MODELS[args.model][1],
                 "prompt": args.prompt,
                 "prompt_text": asdict(PROMPTS[args.prompt]),
                 "split": args.split,
