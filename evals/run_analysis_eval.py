@@ -5,9 +5,10 @@ Run from the repo root, after ``uv run python -m evals.prepare_ami``::
     uv run python -m evals.run_analysis_eval                  # held-out half
     uv run python -m evals.run_analysis_eval --split tune     # while tuning a prompt
 
+It scores the app's own analysis functions and prompt (``evals.analysis``),
+so tune a prompt by editing it in ``streamlit_app.py``, on the tuning half.
 As a module, not a path: ``python evals/run_analysis_eval.py`` puts ``evals/``
-rather than the repo root on the import path. Never in CI: it loads the 8B
-model. Each run prints a table and writes a dated JSON file under
+rather than the repo root on the import path. Never in CI: it loads the LLM. Each run prints a table and writes a dated JSON file under
 ``evals/results/`` (git-ignored), which also carries every summary and the
 excerpt's reference actions for the by-hand action-item recall and rubric.
 """
@@ -22,8 +23,9 @@ from pathlib import Path
 
 import mlx.core as mx
 
+import streamlit_app as app
 from evals.ami import Meeting
-from evals.analysis import MODELS, PROMPTS, Analyzer
+from evals.analysis import MODELS, analyse
 from evals.metrics import brier, quantiles, reliability, roc_auc
 from evals.prepare_ami import EVALS_DIR, MANUAL_DIR, TRANSCRIPTS_DIR, load_labels
 
@@ -129,8 +131,7 @@ def rescore(path: Path, labels: dict) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--split", choices=SPLITS, default="held")
-    parser.add_argument("--prompt", choices=PROMPTS, default="plan")
-    parser.add_argument("--model", choices=MODELS, default="8b")
+    parser.add_argument("--model", choices=MODELS, default="3b")
     parser.add_argument(
         "--rescore",
         type=Path,
@@ -148,14 +149,14 @@ def main() -> None:
     # The A7 limit: Phase 0 measured the 8B within budget only under it.
     mx.set_cache_limit(1 << 30)
     began = time.perf_counter()
-    analyzer = Analyzer(PROMPTS[args.prompt], args.model)
+    model, tokenizer = app.load_llm(*MODELS[args.model])
     load_seconds = time.perf_counter() - began
 
     rows: dict[str, list[dict]] = {source: [] for source in SOURCES}
     for excerpt in excerpts:
         for source in SOURCES:
             path = TRANSCRIPTS_DIR / f"{excerpt['id']}.{source}.txt"
-            result = analyzer.analyse(path.read_text().strip(), questions)
+            result = analyse(model, tokenizer, path.read_text().strip(), questions)
             rows[source].append(
                 {
                     "id": excerpt["id"],
@@ -201,14 +202,20 @@ def main() -> None:
 
     RESULTS_DIR.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out = RESULTS_DIR / f"analysis_{args.model}_{args.split}_{args.prompt}_{stamp}.json"
+    out = RESULTS_DIR / f"analysis_{args.model}_{args.split}_shipped_{stamp}.json"
     out.write_text(
         json.dumps(
             {
                 "model": MODELS[args.model][0],
                 "revision": MODELS[args.model][1],
-                "prompt": args.prompt,
-                "prompt_text": asdict(PROMPTS[args.prompt]),
+                "prompt": "shipped",
+                "prompt_text": {
+                    "system": app.ANALYSIS_SYSTEM_PROMPT,
+                    "transcript": app.ANALYSIS_TRANSCRIPT_PROMPT,
+                    "question": app.QUESTION_PROMPT,
+                    "summary": app.SUMMARY_PROMPT,
+                    "summary_retry": app.SUMMARY_RETRY_PROMPT,
+                },
                 "split": args.split,
                 "machine": platform.platform(),
                 "speed": speed,

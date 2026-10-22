@@ -34,7 +34,11 @@ from mlx_audio.stt.utils import load_model as _load_stt_model
 from mlx_audio.vad.utils import load_model as _load_mlx_vad_model
 from mlx_lm import load as _load_llm
 from mlx_lm.generate import generate_step
-from mlx_lm.models.cache import make_prompt_cache, trim_prompt_cache
+from mlx_lm.models.cache import (
+    can_trim_prompt_cache,
+    make_prompt_cache,
+    trim_prompt_cache,
+)
 from mlx_lm.sample_utils import make_sampler
 from silero_vad import get_speech_timestamps, load_silero_vad
 from streamlit.runtime.uploaded_file_manager import UploadedFile
@@ -218,6 +222,37 @@ SUMMARY_PROMPT = (
     "each one sentence; an empty list if there are none.\n"
     "Use only what the transcript says; do not invent names, numbers or facts."
 )
+# The evaluation's tuning-half finding: asked about "the speaker", the model
+# reads one person and answers No to names and brands someone else says, and
+# the transcript has no speaker turns to tell them apart — so the question
+# says who counts. Held-out pooled ROC-AUC with it, 3B: 0.78 human, 0.76 ASR.
+QUESTION_PROMPT = (
+    "About the transcript above. It may have several speakers, and "
+    '"the speaker" means any of them: answer Yes if it happens anywhere '
+    "in the transcript.\nQuestion: {question}\nAnswer with Yes or No only."
+)
+# Adapted from IBM's Speech to Decisions Space, minus its joke question. These
+# are the nine the evaluation labelled (evals/labels.json), a test keeps the
+# two lists equal.
+DEFAULT_QUESTIONS = (
+    "Is the speaker asking a question?",
+    "Is the speaker making a decision?",
+    "Is the speaker angry or frustrated?",
+    "Does the speaker name a company, product or brand?",
+    "Does the speaker mention money or a price?",
+    "Does the speaker mention a person by name?",
+    "Does the speaker mention a date, a time or a deadline?",
+    "Does the speaker mention a place?",
+    "Does the speaker commit to doing something?",
+)
+# A UI limit more than a speed one: each question is one short forward pass,
+# 0.22s at 30 minutes and 0.40s at the MAX_ANALYSIS_TOKENS cap on the 3B.
+MAX_QUESTIONS = 20
+MAX_QUESTION_CHARS = 200
+# Below this, P(Yes) + P(No) says the model wanted to answer something else
+# and P(yes) is a ratio of two unlikely tokens. Measured on the held-out
+# answers: the 3B's mass was >= 0.9997 on every one, the 8B's >= 0.985.
+MIN_YES_NO_MASS = 0.98
 SUMMARY_RETRY_PROMPT = (
     "That was not a valid JSON object with the keys topic, summary, topics and "
     "action_items. Return only that JSON object."
@@ -863,6 +898,127 @@ def run_pipeline(
     # main() empties the bar the moment this returns, so it would be coalesced
     # with that empty() in the same flush and, in practice, never painted.
     return {"transcript": "\n".join(lines), "segments": texts}
+
+
+class CleanedQuestions(NamedTuple):
+    """The questions to score, and how many lines each rule dropped."""
+
+    questions: list[str]
+    too_long: int
+    special: int
+    over_limit: int
+
+
+def clean_questions(text: str) -> CleanedQuestions:
+    """One question per line: blanks and repeats dropped, then three rules.
+
+    Lines over MAX_QUESTION_CHARS go, as does any line containing `<|`: the
+    tokenizer turns special-token text such as `<|im_end|>` in user text into
+    real control tokens, so a question could close its own turn. Past
+    MAX_QUESTIONS the rest are dropped. The counts are for the UI's captions.
+    """
+    seen: set[str] = set()
+    questions: list[str] = []
+    too_long = special = over_limit = 0
+    for line in text.splitlines():
+        question = line.strip()
+        if not question or question in seen:
+            continue
+        seen.add(question)
+        if len(question) > MAX_QUESTION_CHARS:
+            too_long += 1
+        elif "<|" in question:
+            special += 1
+        elif len(questions) >= MAX_QUESTIONS:
+            over_limit += 1
+        else:
+            questions.append(question)
+    return CleanedQuestions(questions, too_long, special, over_limit)
+
+
+def _yes_no_ids(tokenizer: Any) -> tuple[int, int]:
+    """The answer tokens, `Yes` and `No` with no leading space.
+
+    After `<think></think>` the answer starts with no space, and Phase 0 found
+    these two the top next tokens on all 40 prompts tried. Each must be one
+    token, or P(yes) would read the first piece of a word.
+    """
+    ids = []
+    for word in ("Yes", "No"):
+        encoded = tokenizer.encode(word, add_special_tokens=False)
+        if len(encoded) != 1:
+            raise RuntimeError(f"The language model's tokenizer splits {word!r}.")
+        ids.append(encoded[0])
+    return ids[0], ids[1]
+
+
+def yes_probability(logits: mx.array, yes_id: int, no_id: int) -> tuple[float, float]:
+    """`(P(yes), P(Yes) + P(No))` from next-token logits.
+
+    P(yes) = P(Yes) / (P(Yes) + P(No)), the Space's normalisation: a softmax
+    over the two logits alone, so the rest of the vocabulary cannot move it.
+    The mass is the diagnostic that says whether the ratio means anything.
+    """
+    logits = logits.astype(mx.float32)
+    pair = mx.softmax(logits[mx.array([yes_id, no_id])])
+    full = mx.softmax(logits)
+    return float(pair[0]), float(full[yes_id] + full[no_id])
+
+
+def score_question(
+    model: Any,
+    tokenizer: Any,
+    prefill: TranscriptPrefill,
+    question: str,
+    answer_ids: tuple[int, int],
+) -> tuple[float, float]:
+    """One question's `(P(yes), Yes+No mass)`, from the transcript cache.
+
+    One forward pass over the question turn and the generation prompt, then a
+    trim by exactly that many tokens: nothing is generated, so nothing runs
+    ahead, and the cache is back at the prefix for the next question.
+    """
+    turns = [{"role": "user", "content": QUESTION_PROMPT.format(question=question)}]
+    cache, ids, shared = _task_cache(model, tokenizer, prefill, turns)
+    try:
+        logits = model(mx.array(ids)[None], cache=cache)[0, -1]
+        return yes_probability(logits, *answer_ids)
+    finally:
+        if shared:
+            trim_prompt_cache(cache, len(ids))
+
+
+def answer_questions(
+    model: Any,
+    tokenizer: Any,
+    prefill: TranscriptPrefill,
+    questions: list[str],
+    on_progress: Callable[[int, int, str], None] | None = None,
+) -> list[tuple[str, float]]:
+    """P(yes) for each question, in the user's order (the UI sorts).
+
+    Continues from the transcript cache, after summarize_transcript has
+    trimmed it back or straight from prefill_transcript on a board-only run.
+    on_progress fires before each question, `(i, n, "question i+1 of n")`.
+    A low Yes+No mass is warned about by question number and figure only,
+    never by text (PLAN.md, Security, rule 4).
+    """
+    assert can_trim_prompt_cache(prefill.cache), "the transcript cache must trim"
+    answer_ids = _yes_no_ids(tokenizer)
+    board: list[tuple[str, float]] = []
+    for i, question in enumerate(questions):
+        if on_progress:
+            on_progress(i, len(questions), f"question {i + 1} of {len(questions)}")
+        p_yes, mass = score_question(model, tokenizer, prefill, question, answer_ids)
+        if mass < MIN_YES_NO_MASS:
+            warnings.warn(
+                f"Question {i + 1}: the model put only {mass:.2f} of its "
+                "probability on Yes or No, so its score is unreliable.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        board.append((question, p_yes))
+    return board
 
 
 def segments_text(segments: list[Segment]) -> str:

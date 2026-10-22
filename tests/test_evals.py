@@ -7,7 +7,6 @@ does.
 
 import pytest
 
-from evals.analysis import parse_summary
 from evals.metrics import brier, quantiles, reliability, roc_auc
 from evals.prepare_ami import load_labels, plain_text
 
@@ -52,23 +51,6 @@ def test_plain_text_strips_timestamps() -> None:
     assert plain_text(transcript) == "hello there general kenobi"
 
 
-@pytest.mark.parametrize(
-    ("text", "parses"),
-    [
-        ('{"topic": "t", "summary": "s", "topics": ["a"], "action_items": []}', True),
-        (
-            '```json\n{"topic": "t", "summary": "s", "topics": [], "action_items": []}\n```',
-            True,
-        ),
-        ('{"topic": "t", "summary": "s", "topics": "a", "action_items": []}', False),
-        ('{"topic": "t", "summary": "s", "topics": []}', False),
-        ("not json", False),
-    ],
-)
-def test_parse_summary(text: str, parses: bool) -> None:
-    assert (parse_summary(text) is not None) is parses
-
-
 def test_labels_split_by_meeting_with_every_question_labelled() -> None:
     labels = load_labels()
     questions = set(labels["questions"])
@@ -85,3 +67,11 @@ def test_labels_split_by_meeting_with_every_question_labelled() -> None:
     # Never one meeting's excerpts in both halves (PLAN.md, Evaluation).
     assert not halves["tune"] & halves["held"]
     assert sum(e["split"] == "tune" for e in excerpts) == 10
+
+
+def test_labelled_questions_are_the_shipped_defaults() -> None:
+    # The evaluation scores the board the app shows; if the defaults change,
+    # the labels (and the recorded scores) no longer describe them.
+    from streamlit_app import DEFAULT_QUESTIONS
+
+    assert tuple(load_labels()["questions"].values()) == DEFAULT_QUESTIONS

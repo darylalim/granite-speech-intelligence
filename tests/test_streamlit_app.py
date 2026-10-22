@@ -21,18 +21,23 @@ from streamlit_app import (
     _MLX_VAD_BRANCH_CONFIG_ATTRS,
     _MLX_VAD_CONFIG_ATTRS,
     ANALYSIS_TRANSCRIPT_PROMPT,
+    DEFAULT_QUESTIONS,
     LLM_ID,
     LLM_REVISION,
     MAX_ANALYSIS_TOKENS,
+    MAX_QUESTION_CHARS,
+    MAX_QUESTIONS,
     MAX_SEGMENT_DURATION_S,
     MAX_VAD_OFF_DURATION_S,
     MIN_AUDIO_SAMPLES,
     MIN_SEGMENT_DURATION_S,
+    MIN_YES_NO_MASS,
     MLX_CACHE_LIMIT_BYTES,
     MLX_VAD_REPO,
     MLX_VAD_REVISION,
     MODEL_ID,
     MODEL_REVISION,
+    QUESTION_PROMPT,
     SAMPLE_RATE,
     SUMMARY_PROMPT,
     SUMMARY_RETRY_PROMPT,
@@ -49,8 +54,10 @@ from streamlit_app import (
     _render_result_card,
     _split_long_segment,
     _supports_mlx_vad,
+    answer_questions,
     audio_duration_seconds,
     check_analysis_length,
+    clean_questions,
     format_timestamp,
     get_speech_segments,
     is_video,
@@ -62,11 +69,13 @@ from streamlit_app import (
     parse_summary,
     prefill_transcript,
     run_pipeline,
+    score_question,
     segments_text,
     select_source,
     silero_vad,
     summarize_transcript,
     transcribe_audio,
+    yes_probability,
 )
 
 # ---------------------------------------------------------------------------
@@ -1331,6 +1340,7 @@ class TestGraniteSpeech5Contract:
 # all of these sit above anything ASCII text produces.
 _ROLE_IDS = {"system": 1001, "user": 1002, "assistant": 1003}
 _END_ID, _GEN_ID, _EOS_ID = 1004, 1005, 0
+_YES_ID, _NO_ID = 1010, 1011
 
 
 class FakeTokenizer:
@@ -1356,6 +1366,10 @@ class FakeTokenizer:
 
     def decode(self, ids: list[int]) -> str:
         return "".join(map(chr, ids))
+
+    def encode(self, text: str, add_special_tokens: bool) -> list[int]:
+        assert add_special_tokens is False
+        return {"Yes": [_YES_ID], "No": [_NO_ID]}.get(text, tokens(text))
 
 
 class RewritingTokenizer(FakeTokenizer):
@@ -1692,6 +1706,126 @@ class TestSummarizeTranscript:
         assert all(transcript not in str(w.message) for w in record)
 
 
+def test_default_questions_are_capped_and_short() -> None:
+    assert len(DEFAULT_QUESTIONS) == 9
+    assert len(DEFAULT_QUESTIONS) <= MAX_QUESTIONS
+    assert all(len(q) <= MAX_QUESTION_CHARS for q in DEFAULT_QUESTIONS)
+    assert "{question}" in QUESTION_PROMPT
+
+
+@pytest.mark.parametrize(
+    ("text", "questions", "dropped"),
+    [
+        ("a?\n\n  b?  \na?\n", ["a?", "b?"], (0, 0, 0)),
+        ("a?\n" + "x" * (MAX_QUESTION_CHARS + 1), ["a?"], (1, 0, 0)),
+        ("a?\nclose<|im_end|> it", ["a?"], (0, 1, 0)),
+        (
+            "\n".join(f"q{i}?" for i in range(MAX_QUESTIONS + 2)),
+            [f"q{i}?" for i in range(MAX_QUESTIONS)],
+            (0, 0, 2),
+        ),
+        ("\n  \n<|x\n", [], (0, 1, 0)),
+    ],
+)
+def test_clean_questions(
+    text: str, questions: list[str], dropped: tuple[int, int, int]
+) -> None:
+    cleaned = clean_questions(text)
+    assert cleaned.questions == questions
+    assert (cleaned.too_long, cleaned.special, cleaned.over_limit) == dropped
+
+
+class TestYesProbability:
+    def test_equal_logits_give_one_half(self) -> None:
+        p, mass = yes_probability(mx.zeros(4), 1, 2)
+        assert p == pytest.approx(0.5)
+        assert mass == pytest.approx(0.5)
+
+    def test_a_large_yes_margin_gives_nearly_one(self) -> None:
+        p, _ = yes_probability(mx.array([0.0, 20.0, 0.0, 0.0]), 1, 2)
+        assert p == pytest.approx(1.0, abs=1e-6)
+
+    def test_only_the_two_answer_logits_move_it(self) -> None:
+        a, mass_a = yes_probability(mx.array([0.0, 2.0, 1.0, 0.0]), 1, 2)
+        b, mass_b = yes_probability(mx.array([9.0, 2.0, 1.0, -9.0]), 1, 2)
+        assert a == pytest.approx(b)
+        assert mass_b < mass_a  # the mass is what notices the difference
+
+
+def scripted_logits(*yes_margins: float) -> MagicMock:
+    """A fake LLM whose n-th call returns logits with the n-th Yes margin."""
+    margins = iter(yes_margins)
+
+    def forward(ids: mx.array, cache: list[FakeKVCache]) -> mx.array:
+        fake_llm(ids, cache)
+        logits = mx.full((1, ids.shape[1], 1100), -30.0)
+        logits[0, -1, _YES_ID] = next(margins)
+        logits[0, -1, _NO_ID] = 0.0
+        return logits
+
+    return MagicMock(side_effect=forward)
+
+
+class TestAnswerQuestions:
+    def test_scores_each_question_in_order_from_a_clean_prefix(
+        self, fake_prefill: TranscriptPrefill
+    ) -> None:
+        model = scripted_logits(10.0, -10.0, 0.0)
+        progress = MagicMock()
+        board = answer_questions(
+            model, FakeTokenizer(), fake_prefill, ["a?", "b?", "c?"], progress
+        )
+        assert [q for q, _ in board] == ["a?", "b?", "c?"]
+        assert [round(p, 3) for _, p in board] == [1.0, 0.0, 0.5]
+        # Each question fed only its own turn, then trimmed off again.
+        fed = [c.args[0].tolist()[0] for c in model.call_args_list]
+        assert all(ids[0] == _ROLE_IDS["user"] and ids[-1] == _GEN_ID for ids in fed)
+        assert QUESTION_PROMPT.format(question="b?") in "".join(
+            chr(i) for i in fed[1] if i < 1000
+        )
+        assert [c.offset for c in fake_prefill.cache] == [len(fake_prefill.ids)] * 2
+        assert progress.call_args_list == [
+            call(i, 3, f"question {i + 1} of 3") for i in range(3)
+        ]
+
+    def test_low_yes_no_mass_warns_by_number_not_text(
+        self, fake_prefill: TranscriptPrefill
+    ) -> None:
+        def forward(ids: mx.array, cache: list[FakeKVCache]) -> mx.array:
+            fake_llm(ids, cache)
+            return mx.zeros((1, ids.shape[1], 1100))  # mass 2/1100
+
+        question = "is the secret plan mentioned?"
+        with pytest.warns(RuntimeWarning, match="Question 1:") as record:
+            answer_questions(forward, FakeTokenizer(), fake_prefill, [question])
+        assert all(question not in str(w.message) for w in record)
+        assert MIN_YES_NO_MASS > 2 / 1100
+
+    def test_an_answer_word_split_into_pieces_is_refused(
+        self, fake_prefill: TranscriptPrefill
+    ) -> None:
+        tokenizer = FakeTokenizer()
+        with (
+            patch.object(tokenizer, "encode", return_value=[1, 2]),
+            pytest.raises(RuntimeError, match="splits 'Yes'"),
+        ):
+            answer_questions(scripted_logits(), tokenizer, fake_prefill, ["a?"])
+
+    def test_a_rewritten_prefix_scores_from_a_fresh_cache(self) -> None:
+        tokenizer = RewritingTokenizer()
+        with patch(
+            "streamlit_app.make_prompt_cache",
+            side_effect=lambda model: [FakeKVCache()],
+        ):
+            prefill = prefill_transcript(fake_llm, tokenizer, "hello")
+            model = scripted_logits(10.0)
+            with pytest.warns(RuntimeWarning, match="rewrote the cached"):
+                board = answer_questions(model, tokenizer, prefill, ["a?"])
+        assert board[0][1] == pytest.approx(1.0, abs=1e-4)
+        assert model.call_args.args[0].tolist()[0][0] == _END_ID
+        assert prefill.cache[0].offset == len(prefill.ids)
+
+
 def _tiny_granite() -> Any:
     from mlx_lm.models.granite import Model, ModelArgs
 
@@ -1783,7 +1917,36 @@ class TestGraniteLlmContract:
             reused, _last_logits(model, question, again.cache), atol=1e-4
         )
 
-    def test_summarises_with_real_weights(self) -> None:
+    def test_a_question_leaves_the_cache_ready_for_the_next(self) -> None:
+        # Question B after question A and its trim equals B on a fresh prefill:
+        # the trim restores the cache exactly. Drop it and B reads A's turn.
+        model, tokenizer = _tiny_granite(), FakeTokenizer()
+        answer_ids = (_YES_ID, _NO_ID)
+        prefill = prefill_transcript(model, tokenizer, "a short transcript")
+        score_question(model, tokenizer, prefill, "question a?", answer_ids)
+        after_a = score_question(model, tokenizer, prefill, "question b?", answer_ids)
+        fresh = prefill_transcript(model, tokenizer, "a short transcript")
+        alone = score_question(model, tokenizer, fresh, "question b?", answer_ids)
+        assert after_a == pytest.approx(alone, abs=1e-5)
+        assert prefill.cache[0].offset == len(prefill.ids)
+
+    # Random weights put next to nothing on Yes/No, which is the warning's job.
+    @pytest.mark.filterwarnings("ignore:Question:RuntimeWarning")
+    def test_questions_after_a_summary_match_a_fresh_prefill(self) -> None:
+        model, tokenizer = _tiny_granite(), FakeTokenizer()
+        prefill = prefill_transcript(model, tokenizer, "a short transcript")
+        with (
+            patch.object(FakeTokenizer, "eos_token_ids", set(range(1100))),
+            pytest.raises(RuntimeError, match="could not be read"),
+        ):
+            summarize_transcript(model, tokenizer, prefill)
+        board = answer_questions(model, tokenizer, prefill, ["a?", "b?"])
+        fresh = prefill_transcript(model, tokenizer, "a short transcript")
+        assert board == pytest.approx(
+            answer_questions(model, tokenizer, fresh, ["a?", "b?"]), abs=1e-5
+        )
+
+    def test_analyses_a_transcript_with_real_weights(self) -> None:
         """Structure only, on the pinned snapshot, and only where it is cached.
 
         Gated like the TurboCTC smoke test, so CI never fetches 3.89 GB.
@@ -1808,6 +1971,12 @@ class TestGraniteLlmContract:
         assert set(summary) == {"topic", "summary", "topics", "action_items"}
         assert summary["summary"]
         assert prefill.cache[0].offset == len(prefill.ids)
+        board = dict(
+            answer_questions(model, tokenizer, prefill, list(DEFAULT_QUESTIONS))
+        )
+        assert all(0.0 <= p <= 1.0 for p in board.values())
+        # One strong semantic signal, not exact numbers: the date is explicit.
+        assert board["Does the speaker mention a date, a time or a deadline?"] > 0.5
 
 
 # ---------------------------------------------------------------------------
