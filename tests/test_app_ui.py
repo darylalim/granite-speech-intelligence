@@ -22,17 +22,20 @@ instead of depending on iteration order.
 """
 
 import io
+import json
 import tomllib
 import wave
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from fractions import Fraction
 from pathlib import Path
+from typing import NamedTuple
 from unittest.mock import MagicMock, patch
 
 import av
 import pytest
 import streamlit as st
+from huggingface_hub.errors import LocalEntryNotFoundError
 from streamlit import config
 from streamlit.proto.Block_pb2 import Block
 from streamlit.proto.Common_pb2 import FileURLs
@@ -46,12 +49,17 @@ from streamlit.testing.v1.element_tree import Block as TreeBlock
 
 from streamlit_app import (
     ACCEPTED_FORMATS_CAPTION,
+    BOARD_CAPTION,
+    DEFAULT_QUESTIONS,
     LAYOUT_MAX_WIDTH_PX,
+    LLM_ID,
+    LLM_REVISION,
     MLX_CACHE_LIMIT_BYTES,
     MODEL_ID,
     MODEL_REVISION,
     TRANSCRIPT_MAX_WIDTH_PX,
 )
+from tests.llm_fakes import EOS_ID, FakeLlm, FakeTokenizer, ScriptedGenerate, tokens
 
 APP = Path(__file__).parent.parent / "streamlit_app.py"
 AUDIO_DIR = Path(__file__).parent / "data" / "audio"
@@ -230,16 +238,21 @@ def _assert_single_result_card(at: AppTest) -> None:
 
 def test_default_state() -> None:
     """App renders without exception in the documented default widget state:
-    one toggle on, Run disabled, no results — and none of the prompt-era
-    controls (source language, task pills, keywords) anywhere in the tree."""
+    VAD on and analysis off, Run disabled, no results — and none of the
+    prompt-era controls (source language, task pills, keywords) anywhere in
+    the tree. Analysis is off by default so the default app, and its memory,
+    are what they were before it existed."""
     at = _app().run()
     assert not at.exception
     assert at.title[0].value == "Granite Speech Intelligence"
     assert len(at.segmented_control) == 0
     assert len(at.pills) == 0
     assert len(at.multiselect) == 0
-    assert {t.key for t in at.toggle} == {"use_segmentation"}
-    assert all(t.value is True for t in at.toggle)
+    assert {t.key: t.value for t in at.toggle} == {
+        "use_segmentation": True,
+        "use_analysis": False,
+    }
+    assert len(at.expander) == 0  # the questions only appear with analysis on
     # Run is disabled until audio is loaded.
     assert at.button(key="transcribe").disabled is True
     assert len(at.subheader) == 0
@@ -263,7 +276,7 @@ def test_page_config_is_wide() -> None:
 
 
 def test_sidebar_holds_settings_and_app_info_only() -> None:
-    """The sidebar is the VAD faux-label and the model line, nothing else; the
+    """The sidebar is the two settings rows and the model line, nothing else; the
     whole run flow — input tabs, Transcribe, the player and the transcript —
     is in main, where it stays visible when the sidebar is collapsed.
 
@@ -272,11 +285,12 @@ def test_sidebar_holds_settings_and_app_info_only() -> None:
     zero-caption assertion is the guard against one coming back."""
     at = _app().run()
     assert not at.exception
-    assert {t.key for t in at.sidebar.toggle} == {"use_segmentation"}
-    # Two markdown elements and no caption: the VAD faux-label and the model
-    # line, which is st.markdown(":small[...]") so its link escapes caption
-    # opacity (see the comment on the call). Both are pinned by value below.
-    assert len(at.sidebar.markdown) == 2
+    assert {t.key for t in at.sidebar.toggle} == {"use_segmentation", "use_analysis"}
+    # Three markdown elements and no caption: the two faux-labels and the
+    # model line, which is st.markdown(":small[...]") so its link escapes
+    # caption opacity (see the comment on the call). The analysis model's
+    # line joins them only while analysis is on.
+    assert len(at.sidebar.markdown) == 3
     assert len(at.sidebar.caption) == 0
     assert len(at.sidebar.file_uploader) == 0
     # audio_input has no typed accessor on AppTest; get() filters by proto type.
@@ -790,6 +804,408 @@ def test_a_failed_rerun_does_not_leave_the_previous_card(
     assert not at.exception
     assert len(at.subheader) == 0
     assert len(at.text) == 0
+
+
+# ---------------------------------------------------------------------------
+# Transcript analysis
+# ---------------------------------------------------------------------------
+
+SUMMARY = {
+    "topic": "Launch planning",
+    "summary": "They plan the launch.",
+    "topics": ["launch", "budget"],
+    "action_items": ["Send the slides."],
+}
+DATE_QUESTION = "Does the speaker mention a date, a time or a deadline?"
+ASKING_QUESTION = "Is the speaker asking a question?"
+
+
+class Llm(NamedTuple):
+    load: MagicMock
+    model: FakeLlm
+    generate: ScriptedGenerate
+
+
+def _reply(summary: dict) -> list[int]:
+    return [*tokens(json.dumps(summary)), EOS_ID]
+
+
+@contextmanager
+def _llm(summary: dict = SUMMARY, *, cached: bool = True) -> Generator[Llm]:
+    """The shared mlx_lm entry points, patched: `load` hands back a FakeLlm and
+    FakeTokenizer, and generate_step replays the summary as JSON. The real
+    make_prompt_cache, trim_prompt_cache and sampler run against them."""
+    model = FakeLlm({DATE_QUESTION: 8.0, ASKING_QUESTION: -8.0})
+    generate = ScriptedGenerate(*[_reply(summary)] * 10)
+    path = "/cache/model.safetensors" if cached else None
+    with (
+        patch("mlx_lm.load", return_value=(model, FakeTokenizer())) as load,
+        patch("mlx_lm.generate.generate_step", new=generate),
+        patch("huggingface_hub.try_to_load_from_cache", return_value=path),
+    ):
+        yield Llm(load, model, generate)
+
+
+@pytest.fixture
+def llm() -> Iterator[Llm]:
+    with _llm() as patched:
+        yield patched
+
+
+def _transcribe(audio_bytes: bytes, *, analysis: bool) -> AppTest:
+    """Upload, VAD off (one segment, no VAD loader), analysis as given, Run."""
+    at = _app().run()
+    at.file_uploader[0].set_value(("sample_10s.wav", audio_bytes, "audio/wav"))
+    at.toggle(key="use_segmentation").set_value(False)
+    at.toggle(key="use_analysis").set_value(analysis)
+    at.run()
+    at.button(key="transcribe").click()
+    at.run()
+    return at
+
+
+def _slot(at: AppTest) -> TreeBlock:
+    (slot,) = [
+        c
+        for c in at.columns[1].container
+        if c.proto.width_config.pixel_width == TRANSCRIPT_MAX_WIDTH_PX
+    ]
+    return slot
+
+
+def _cards(at: AppTest) -> list[TreeBlock]:
+    """The bordered cards in the transcript slot, in page order."""
+    return [c for c in _slot(at).container if c.proto.flex_container.border]
+
+
+def _analysis_card(at: AppTest) -> TreeBlock:
+    (card,) = [c for c in _cards(at) if [s.value for s in c.subheader] == ["Analysis"]]
+    return card
+
+
+def _board(card: TreeBlock) -> list[str]:
+    """The board's rows as their labels: one progress bar per question."""
+    return [bar.proto.text for bar in card.get("progress")]
+
+
+def test_analysis_off_never_loads_the_llm(audio_bytes: bytes, llm: Llm) -> None:
+    """The default: no LLM, no Analysis card, no questions box, and the slot's
+    shape is the same as with analysis on — two placeholders, then the card."""
+    with patch("mlx_audio.stt.utils.load_model") as speech:
+        speech.return_value.generate.return_value.text = "hello world"
+        at = _transcribe(audio_bytes, analysis=False)
+    _assert_single_result_card(at)
+    llm.load.assert_not_called()
+    assert len(at.expander) == 0
+    assert [c.type for c in _slot(at).children.values()][:2] == ["empty", "empty"]
+    assert _slot(at).children[2].proto.flex_container.border
+
+
+def test_run_with_analysis_on_draws_the_card_above_the_transcript(
+    audio_bytes: bytes, speech_loader: MagicMock, llm: Llm
+) -> None:
+    """Transcribe with analysis on analyses straight after: the Analysis card
+    in slot index 1 above the transcript card at index 2, both toasts, the
+    transcript card drawn once, and the board ranked by P(yes)."""
+    at = _transcribe(audio_bytes, analysis=True)
+    assert not at.exception
+    llm.load.assert_called_once_with(LLM_ID, revision=LLM_REVISION)
+    # One "Transcription" subheader: the card drawn before the analysis is
+    # not drawn again after it.
+    assert [s.value for s in at.subheader] == ["Analysis", "Transcription"]
+    assert [t.value for t in at.toast] == [
+        "Transcription complete",
+        "Analysis complete",
+    ]
+    slot = _slot(at)
+    children = list(slot.children.values())
+    assert children[0].type == "empty"  # feedback, emptied
+    analysis, transcript = _cards(at)
+    assert [s.value for s in analysis.subheader] == ["Analysis"]
+    assert [s.value for s in transcript.subheader] == ["Transcription"]
+    # Index 1 holds the analysis slot's container, index 2 the transcript card.
+    assert children[2].proto.flex_container.border
+    assert [s.value for s in children[1].subheader] == ["Analysis"]
+
+    texts = [t.value for t in analysis.text]
+    assert texts == [
+        "Launch planning",
+        "They plan the launch.",
+        "launch · budget",
+        "• Send the slides.",
+    ]
+    rows = _board(analysis)
+    assert rows[0] == f"**1.00** · {DATE_QUESTION}"
+    assert rows[-1] == f"**0.00** · {ASKING_QUESTION}"
+    assert sorted(r.split(" · ", 1)[1] for r in rows) == sorted(DEFAULT_QUESTIONS)
+    values = [bar.proto.value for bar in analysis.get("progress")]
+    assert values == sorted(values, reverse=True)
+    assert [c.value for c in analysis.caption] == [BOARD_CAPTION]
+    (download,) = analysis.download_button
+    assert download.key == "dl_md"
+    assert download.proto.ignore_rerun is True
+    assert slot.children[0].type == "empty"  # the bar is emptied, not left
+    # Nothing was generated beyond one summary from one prefill.
+    assert len(llm.generate.prompts) == 1
+    assert at.session_state["summary"] == SUMMARY
+
+
+def test_model_output_is_shown_as_plain_text(
+    audio_bytes: bytes, speech_loader: MagicMock
+) -> None:
+    """Words in a recording reach the prompt, so a summary can carry Markdown
+    the model was told to write. Every field is st.text, and no markdown
+    element in the card holds a link or image (PLAN.md, Security, rule 1)."""
+    image, link = "![x](http://example.invalid/i)", "[x](http://example.invalid/l)"
+    hostile = {
+        "topic": image,
+        "summary": f"see {link}",
+        "topics": [image],
+        "action_items": [link],
+    }
+    with _llm(hostile):
+        at = _transcribe(audio_bytes, analysis=True)
+    assert not at.exception
+    card = _analysis_card(at)
+    texts = [t.value for t in card.text]
+    assert texts == [image, f"see {link}", image, f"• {link}"]
+    assert all("](" not in m.value for m in card.markdown)
+
+
+def test_blank_transcript_is_not_analysed(audio_bytes: bytes, llm: Llm) -> None:
+    """No speech, no analysis: summarising nothing would only invent content,
+    so the model is never loaded."""
+    with patch("mlx_audio.stt.utils.load_model") as speech:
+        speech.return_value.generate.return_value.text = ""
+        at = _transcribe(audio_bytes, analysis=True)
+    assert not at.exception
+    llm.load.assert_not_called()
+    assert [c.value for c in _slot(at).caption] == ["No speech to analyse."]
+    assert "summary" not in at.session_state
+    assert [s.value for s in at.subheader] == ["Transcription"]
+
+
+def test_a_hopeless_length_is_refused_before_the_model_loads(
+    audio_bytes: bytes, llm: Llm
+) -> None:
+    """The word-count pre-check runs before load_llm: the exact count needs
+    the 3.9 GB model's tokenizer, and a three-hour transcript should not wait
+    behind that download only to be refused."""
+    with patch("mlx_audio.stt.utils.load_model") as speech:
+        speech.return_value.generate.return_value.text = "word " * 40_000
+        at = _transcribe(audio_bytes, analysis=True)
+    assert not at.exception
+    llm.load.assert_not_called()
+    (error,) = _slot(at).error
+    assert error.value.startswith("Transcript is too long to analyse")
+    assert "result" in at.session_state
+
+
+@pytest.mark.parametrize(
+    ("failure", "one_line"),
+    [
+        # Offline on first use: load_llm's one-line mapping.
+        (LocalEntryNotFoundError("no cache, no network"), True),
+        # Anything unexpected gets the traceback — still in the analysis slot.
+        (ValueError("bad shape"), False),
+    ],
+)
+def test_an_analysis_failure_keeps_the_transcript(
+    audio_bytes: bytes,
+    speech_loader: MagicMock,
+    llm: Llm,
+    failure: Exception,
+    one_line: bool,
+) -> None:
+    """The transcript is committed and drawn before the analysis starts, so an
+    analysis failure shows in the analysis slot and the transcript stays:
+    card, toast and session state. main()'s own boundary would have ended
+    the run and hidden it."""
+    llm.load.side_effect = failure
+    at = _transcribe(audio_bytes, analysis=True)
+    # The one-line path raises nothing; the other is exactly one traceback.
+    assert len(at.exception) == (0 if one_line else 1)
+    assert "result" in at.session_state
+    assert "summary" not in at.session_state
+    assert [t.value for t in at.toast] == ["Transcription complete"]
+    (transcript,) = _cards(at)
+    assert [s.value for s in transcript.subheader] == ["Transcription"]
+    slot = _slot(at)
+    analysis = slot.children[1]
+    if one_line:
+        (error,) = analysis.error
+        assert error.value.startswith("The language model isn't downloaded yet")
+        assert error.icon == ":material/error:"
+    else:
+        assert len(analysis.exception) == 1
+        assert len(analysis.error) == 0
+    # The way to retry is right there.
+    assert [b.label for b in analysis.button] == ["Analyse"]
+    assert len(at.get("progress")) == 0  # the feedback bar emptied in a finally
+
+
+def test_a_model_error_mid_analysis_stays_in_the_slot(
+    audio_bytes: bytes, speech_loader: MagicMock, llm: Llm
+) -> None:
+    """A failure inside generation, not the load, lands in the same place."""
+    llm.generate.replies = [[]] * 10  # never reaches end of turn: "cut off"
+    at = _transcribe(audio_bytes, analysis=True)
+    assert not at.exception
+    (error,) = _slot(at).children[1].error
+    assert "cut off" in error.value
+    assert [s.value for s in at.subheader] == ["Transcription"]
+
+
+def test_turning_analysis_on_after_a_run_waits_for_analyse(
+    audio_bytes: bytes, speech_loader: MagicMock, llm: Llm
+) -> None:
+    """Toggling analysis on with a transcript on screen offers "Analyse"
+    rather than running anything, and Analyse never re-transcribes."""
+    at = _transcribe(audio_bytes, analysis=False)
+    generate = speech_loader.return_value.generate
+    assert generate.call_count == 1
+
+    at.toggle(key="use_analysis").set_value(True).run()
+    assert not at.exception
+    llm.load.assert_not_called()
+    assert "result" in at.session_state  # analysis is not part of the input key
+    assert [b.label for b in _slot(at).button] == ["Analyse"]
+    assert at.button(key="analyse").proto.type == "secondary"
+
+    at.button(key="analyse").click().run()
+    assert not at.exception
+    assert generate.call_count == 1
+    assert [s.value for s in at.subheader] == ["Analysis", "Transcription"]
+    assert at.session_state["summary"] == SUMMARY
+    assert [t.value for t in at.toast] == ["Analysis complete"]
+    assert len(_slot(at).button) == 0  # nothing left to compute
+
+
+def test_editing_questions_rescores_the_board_only(
+    audio_bytes: bytes, speech_loader: MagicMock, llm: Llm
+) -> None:
+    """The summary is keyed by the input and the board by the input and the
+    questions, so an edit drops the board alone: Analyse then scores the new
+    questions from a fresh prefill and generates no second summary."""
+    at = _transcribe(audio_bytes, analysis=True)
+    assert len(llm.generate.prompts) == 1
+
+    at.text_area(key="questions").set_value(f"{DATE_QUESTION}\nIs it raining?")
+    at.run()
+    assert not at.exception
+    assert "board" not in at.session_state
+    assert at.session_state["summary"] == SUMMARY
+    assert "result" in at.session_state
+    card = _analysis_card(at)
+    assert _board(card) == []
+    assert [b.label for b in card.button] == ["Analyse"]
+
+    at.button(key="analyse").click().run()
+    assert not at.exception
+    assert len(llm.generate.prompts) == 1  # no second summary
+    assert speech_loader.return_value.generate.call_count == 1
+    assert _board(_analysis_card(at)) == [
+        f"**1.00** · {DATE_QUESTION}",
+        "**0.50** · Is it raining?",
+    ]
+
+
+def test_turning_analysis_off_and_on_keeps_the_analysis(
+    audio_bytes: bytes, speech_loader: MagicMock, llm: Llm
+) -> None:
+    """Analysis is not part of the input key, and with it off the questions
+    box is not read — so turning it off and back on shows the same card,
+    board included, with nothing recomputed and no "Analyse" to press."""
+    at = _transcribe(audio_bytes, analysis=True)
+    board = at.session_state["board"]
+    at.toggle(key="use_analysis").set_value(False).run()
+    assert not at.exception
+    assert [s.value for s in at.subheader] == ["Transcription"]
+    at.toggle(key="use_analysis").set_value(True).run()
+    assert not at.exception
+    assert at.session_state["board"] == board
+    assert len(_board(_analysis_card(at))) == len(DEFAULT_QUESTIONS)
+    assert len(_slot(at).button) == 0
+    assert len(llm.generate.prompts) == 1
+    llm.load.assert_called_once()
+
+
+def test_zero_questions_skip_the_board(
+    audio_bytes: bytes, speech_loader: MagicMock, llm: Llm
+) -> None:
+    """With every line cleared there is nothing to score: the summary still
+    runs, and the board's place says what to do instead."""
+    at = _app().run()
+    at.file_uploader[0].set_value(("sample_10s.wav", audio_bytes, "audio/wav"))
+    at.toggle(key="use_segmentation").set_value(False)
+    at.toggle(key="use_analysis").set_value(True)
+    at.run()
+    at.text_area(key="questions").set_value("  \n")
+    at.run()
+    at.button(key="transcribe").click().run()
+    assert not at.exception
+    card = _analysis_card(at)
+    assert _board(card) == []
+    assert [c.value for c in card.caption] == ["Add at least one question to score."]
+    assert len(card.button) == 0
+    assert "board" not in at.session_state
+
+
+def test_skipped_questions_are_counted_under_the_box(llm: Llm) -> None:
+    """Lines the cleaner drops are counted in a caption beside the box, by
+    rule, and never quoted back."""
+    at = _app().run()
+    at.toggle(key="use_analysis").set_value(True).run()
+    long = "x" * 201
+    at.text_area(key="questions").set_value(f"ok?\nstop<|im_end|>\n{long}\n{long}y")
+    at.run()
+    assert not at.exception
+    (expander,) = at.expander
+    assert expander.label == "Analysis questions"
+    assert [c.value for c in expander.caption] == [
+        "2 questions were skipped for being longer than 200 characters.",
+        "1 question was skipped because it contains \\<|.",
+    ]
+
+
+def test_questions_survive_turning_analysis_off_and_on(llm: Llm) -> None:
+    """persist_state="session": without it the box's value is dropped while
+    it is not rendered, and the edited questions reset to the defaults."""
+    at = _app().run()
+    at.toggle(key="use_analysis").set_value(True).run()
+    box = at.text_area(key="questions")
+    assert box.label == "Questions"
+    assert box.value == "\n".join(DEFAULT_QUESTIONS)
+    box.set_value("Is it raining?").run()
+    at.toggle(key="use_analysis").set_value(False).run()
+    assert len(at.text_area) == 0
+    at.toggle(key="use_analysis").set_value(True).run()
+    assert not at.exception
+    assert at.text_area(key="questions").value == "Is it raining?"
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_the_first_download_is_announced(cached: bool) -> None:
+    """The model's size is on screen, not only in the toggle's tooltip, until
+    it is in the local cache."""
+    with _llm(cached=cached):
+        at = _app().run()
+        at.toggle(key="use_analysis").set_value(True).run()
+    assert not at.exception
+    notice = "The first analysis downloads the language model (about 4 GB)."
+    captions = [c.value for c in at.columns[0].caption]
+    assert (notice in captions) is not cached
+
+
+def test_sidebar_names_the_analysis_model_when_it_is_on(llm: Llm) -> None:
+    at = _app().run()
+    at.toggle(key="use_analysis").set_value(True).run()
+    assert not at.exception
+    assert len(at.sidebar.caption) == 0
+    (line,) = [m for m in at.sidebar.markdown if LLM_ID in m.value]
+    assert line.value == (
+        f":small[Analysis model: [{LLM_ID}](https://huggingface.co/{LLM_ID})]"
+    )
 
 
 def test_config_theme_defines_both_palettes(app_config: dict) -> None:

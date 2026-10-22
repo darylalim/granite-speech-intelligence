@@ -2,6 +2,7 @@ import inspect
 import io
 import re
 import struct
+import threading
 import wave
 from collections.abc import Iterator
 from itertools import pairwise
@@ -21,6 +22,7 @@ from streamlit_app import (
     _MLX_VAD_BRANCH_CONFIG_ATTRS,
     _MLX_VAD_CONFIG_ATTRS,
     ANALYSIS_TRANSCRIPT_PROMPT,
+    BOARD_CAPTION,
     DEFAULT_QUESTIONS,
     LLM_ID,
     LLM_REVISION,
@@ -45,37 +47,64 @@ from streamlit_app import (
     VAD_CHUNK_SAMPLES,
     VAD_CONTEXT_SAMPLES,
     VIDEO_FORMATS,
+    CleanedQuestions,
     PipelineResult,
     TranscriptPrefill,
     _decode_audio,
+    _escape_markdown,
+    _inference_turn,
     _labeled_toggle,
     _mlx_vad_probabilities,
     _mlx_vad_windows,
+    _render_analysis_card,
     _render_result_card,
+    _skipped_questions_captions,
     _split_long_segment,
     _supports_mlx_vad,
+    analysis_markdown,
     answer_questions,
     audio_duration_seconds,
     check_analysis_length,
     clean_questions,
     format_timestamp,
     get_speech_segments,
+    inference_lock,
     is_video,
     limit_mlx_cache,
+    llm_is_cached,
     load_and_preprocess_audio,
     load_llm,
     load_model,
     load_vad_model,
     parse_summary,
     prefill_transcript,
+    run_analysis,
     run_pipeline,
     score_question,
     segments_text,
     select_source,
     silero_vad,
+    sorted_board,
     summarize_transcript,
     transcribe_audio,
     yes_probability,
+)
+from tests.llm_fakes import (
+    END_ID,
+    EOS_ID,
+    GEN_ID,
+    NO_ID,
+    ROLE_IDS,
+    VALID_JSON,
+    VALID_SUMMARY,
+    YES_ID,
+    FakeKVCache,
+    FakeLlm,
+    FakeTokenizer,
+    RewritingTokenizer,
+    ScriptedGenerate,
+    fake_llm,
+    tokens,
 )
 
 # ---------------------------------------------------------------------------
@@ -1336,120 +1365,6 @@ class TestGraniteSpeech5Contract:
 # Transcript analysis
 # ---------------------------------------------------------------------------
 
-# FakeTokenizer's control tokens; every character token is its code point, so
-# all of these sit above anything ASCII text produces.
-_ROLE_IDS = {"system": 1001, "user": 1002, "assistant": 1003}
-_END_ID, _GEN_ID, _EOS_ID = 1004, 1005, 0
-_YES_ID, _NO_ID = 1010, 1011
-
-
-class FakeTokenizer:
-    """Characters as token ids: decode is chr, and a prompt's prefix stays put.
-
-    The real template's only property the app relies on is that adding turns
-    leaves the earlier turns' ids unchanged; this one has it by construction.
-    """
-
-    eos_token_ids: ClassVar[set[int]] = {_EOS_ID}
-
-    def apply_chat_template(
-        self,
-        messages: list[dict[str, str]],
-        add_generation_prompt: bool,
-        enable_thinking: bool,
-    ) -> list[int]:
-        assert enable_thinking is False
-        ids: list[int] = []
-        for message in messages:
-            ids += [_ROLE_IDS[message["role"]], *map(ord, message["content"]), _END_ID]
-        return [*ids, _GEN_ID] if add_generation_prompt else ids
-
-    def decode(self, ids: list[int]) -> str:
-        return "".join(map(chr, ids))
-
-    def encode(self, text: str, add_special_tokens: bool) -> list[int]:
-        assert add_special_tokens is False
-        return {"Yes": [_YES_ID], "No": [_NO_ID]}.get(text, tokens(text))
-
-
-class RewritingTokenizer(FakeTokenizer):
-    """A template that rewrites the start once a task turn follows the prefix."""
-
-    def apply_chat_template(
-        self,
-        messages: list[dict[str, str]],
-        add_generation_prompt: bool,
-        enable_thinking: bool,
-    ) -> list[int]:
-        ids = super().apply_chat_template(
-            messages, add_generation_prompt, enable_thinking
-        )
-        return [_END_ID, *ids] if len(messages) > 2 else ids
-
-
-class FakeKVCache:
-    """Just the KVCache surface the app and trim_prompt_cache touch."""
-
-    def __init__(self) -> None:
-        self.offset = 0
-        self.state = mx.array(0)
-
-    def is_trimmable(self) -> bool:
-        return True
-
-    def trim(self, n: int) -> int:
-        n = min(self.offset, n)
-        self.offset -= n
-        return n
-
-
-def fake_llm(ids: mx.array, cache: list[FakeKVCache]) -> mx.array:
-    for c in cache:
-        c.offset += ids.shape[1]
-    return mx.zeros((1, ids.shape[1], 8))
-
-
-def tokens(text: str) -> list[int]:
-    return [ord(c) for c in text]
-
-
-VALID_JSON = '{"topic": "t", "summary": "s", "topics": ["a"], "action_items": []}'
-VALID_SUMMARY = {"topic": "t", "summary": "s", "topics": ["a"], "action_items": []}
-
-
-class ScriptedGenerate:
-    """Stands in for generate_step, replaying one scripted reply per call.
-
-    Like the real one it advances the cache by the prompt, then computes one
-    step ahead of each token it yields — the extra token the trim must remove
-    by reading `offset` rather than counting what the loop consumed.
-    """
-
-    def __init__(self, *replies: list[int]) -> None:
-        self.replies = list(replies)
-        self.prompts: list[list[int]] = []
-
-    def __call__(
-        self,
-        prompt: mx.array,
-        model: Any,
-        *,
-        max_tokens: int,
-        sampler: Any,
-        prompt_cache: list[FakeKVCache],
-    ) -> Iterator[tuple[int, None]]:
-        self.prompts.append([int(t) for t in prompt])
-        reply = self.replies[len(self.prompts) - 1]
-        for c in prompt_cache:
-            c.offset += prompt.size
-        for token in reply[:max_tokens]:
-            for c in prompt_cache:
-                c.offset += 1
-            yield token, None
-
-    def prompt_text(self, i: int) -> str:
-        return "".join(chr(t) for t in self.prompts[i] if t < 1000)
-
 
 @pytest.fixture
 def fake_prefill() -> Iterator[TranscriptPrefill]:
@@ -1620,7 +1535,7 @@ class TestSummarizeTranscript:
         self, fake_prefill: TranscriptPrefill
     ) -> None:
         # Junk after the EOS must never reach the parser.
-        generate = ScriptedGenerate([*tokens(VALID_JSON), _EOS_ID, *tokens("junk")])
+        generate = ScriptedGenerate([*tokens(VALID_JSON), EOS_ID, *tokens("junk")])
         with patch("streamlit_app.generate_step", generate):
             summary = summarize_transcript(fake_llm, FakeTokenizer(), fake_prefill)
         assert summary == VALID_SUMMARY
@@ -1645,7 +1560,7 @@ class TestSummarizeTranscript:
         self, fake_prefill: TranscriptPrefill
     ) -> None:
         generate = ScriptedGenerate(
-            [*tokens("not json"), _EOS_ID], [*tokens(VALID_JSON), _EOS_ID]
+            [*tokens("not json"), EOS_ID], [*tokens(VALID_JSON), EOS_ID]
         )
         with patch("streamlit_app.generate_step", generate):
             summary = summarize_transcript(fake_llm, FakeTokenizer(), fake_prefill)
@@ -1659,7 +1574,7 @@ class TestSummarizeTranscript:
         self, fake_prefill: TranscriptPrefill
     ) -> None:
         generate = ScriptedGenerate(
-            [*tokens("nope"), _EOS_ID], [*tokens("still nope"), _EOS_ID]
+            [*tokens("nope"), EOS_ID], [*tokens("still nope"), EOS_ID]
         )
         with (
             patch("streamlit_app.generate_step", generate),
@@ -1672,7 +1587,7 @@ class TestSummarizeTranscript:
         self, fake_prefill: TranscriptPrefill
     ) -> None:
         reply = tokens(VALID_JSON.replace('"s"', '"' + "x" * 40 + '"'))
-        generate = ScriptedGenerate([*reply, _EOS_ID])
+        generate = ScriptedGenerate([*reply, EOS_ID])
         progress = MagicMock()
         with patch("streamlit_app.generate_step", generate):
             summarize_transcript(fake_llm, FakeTokenizer(), fake_prefill, progress)
@@ -1691,7 +1606,7 @@ class TestSummarizeTranscript:
             side_effect=lambda model: [FakeKVCache()],
         ) as make_cache:
             prefill = prefill_transcript(fake_llm, tokenizer, transcript)
-            generate = ScriptedGenerate([*tokens(VALID_JSON), _EOS_ID])
+            generate = ScriptedGenerate([*tokens(VALID_JSON), EOS_ID])
             with (
                 patch("streamlit_app.generate_step", generate),
                 pytest.warns(RuntimeWarning, match="rewrote the cached") as record,
@@ -1699,7 +1614,7 @@ class TestSummarizeTranscript:
                 summary = summarize_transcript(fake_llm, tokenizer, prefill)
         assert summary == VALID_SUMMARY
         # The whole prompt went to a fresh cache; the shared one is untouched.
-        assert generate.prompts[0][0] == _END_ID
+        assert generate.prompts[0][0] == END_ID
         assert make_cache.call_count == 2
         assert prefill.cache[0].offset == len(prefill.ids)
         # No transcript text in warnings (PLAN.md, Security, rule 4).
@@ -1759,8 +1674,8 @@ def scripted_logits(*yes_margins: float) -> MagicMock:
     def forward(ids: mx.array, cache: list[FakeKVCache]) -> mx.array:
         fake_llm(ids, cache)
         logits = mx.full((1, ids.shape[1], 1100), -30.0)
-        logits[0, -1, _YES_ID] = next(margins)
-        logits[0, -1, _NO_ID] = 0.0
+        logits[0, -1, YES_ID] = next(margins)
+        logits[0, -1, NO_ID] = 0.0
         return logits
 
     return MagicMock(side_effect=forward)
@@ -1779,7 +1694,7 @@ class TestAnswerQuestions:
         assert [round(p, 3) for _, p in board] == [1.0, 0.0, 0.5]
         # Each question fed only its own turn, then trimmed off again.
         fed = [c.args[0].tolist()[0] for c in model.call_args_list]
-        assert all(ids[0] == _ROLE_IDS["user"] and ids[-1] == _GEN_ID for ids in fed)
+        assert all(ids[0] == ROLE_IDS["user"] and ids[-1] == GEN_ID for ids in fed)
         assert QUESTION_PROMPT.format(question="b?") in "".join(
             chr(i) for i in fed[1] if i < 1000
         )
@@ -1822,8 +1737,306 @@ class TestAnswerQuestions:
             with pytest.warns(RuntimeWarning, match="rewrote the cached"):
                 board = answer_questions(model, tokenizer, prefill, ["a?"])
         assert board[0][1] == pytest.approx(1.0, abs=1e-4)
-        assert model.call_args.args[0].tolist()[0][0] == _END_ID
+        assert model.call_args.args[0].tolist()[0][0] == END_ID
         assert prefill.cache[0].offset == len(prefill.ids)
+
+
+class TestRunAnalysis:
+    """The orchestration main() calls with the LLM loaded and the lock held."""
+
+    def _run(
+        self, questions: list[str], summarise: bool
+    ) -> tuple[Any, Any, MagicMock, ScriptedGenerate, MagicMock, MagicMock]:
+        model = MagicMock(side_effect=FakeLlm(dict.fromkeys(questions, 10.0)))
+        generate = ScriptedGenerate([*tokens(VALID_JSON), EOS_ID])
+        progress = MagicMock()
+        with (
+            patch(
+                "streamlit_app.make_prompt_cache",
+                side_effect=lambda model: [FakeKVCache()],
+            ) as make_cache,
+            patch("streamlit_app.prefill_transcript", wraps=prefill_transcript) as pre,
+            patch("streamlit_app.generate_step", generate),
+        ):
+            summary, board = run_analysis(
+                model, FakeTokenizer(), "hello", questions, summarise, progress
+            )
+        assert make_cache.call_count == 1
+        return summary, board, pre, generate, progress, model
+
+    def test_one_prefill_serves_the_summary_and_every_question(self) -> None:
+        summary, board, prefill, generate, progress, _ = self._run(["a?", "b?"], True)
+        assert prefill.call_count == 1
+        assert summary == VALID_SUMMARY
+        assert board == [
+            ("a?", pytest.approx(1.0, abs=1e-4)),
+            ("b?", pytest.approx(1.0, abs=1e-4)),
+        ]
+        assert len(generate.prompts) == 1
+        # Each stage worded for the bar, in run order (the summary reports
+        # every ANALYSIS_PROGRESS_TOKENS, so its label repeats).
+        updates = [c.args for c in progress.call_args_list]
+        assert list(dict.fromkeys(label for _, label in updates)) == [
+            "Reading transcript (part 1 of 1)...",
+            "Summarising...",
+            "Answering question 1 of 2...",
+            "Answering question 2 of 2...",
+        ]
+        assert updates[-2:] == [
+            (0.0, "Answering question 1 of 2..."),
+            (0.5, "Answering question 2 of 2..."),
+        ]
+
+    def test_a_board_only_run_generates_no_summary(self) -> None:
+        summary, board, prefill, generate, _, _ = self._run(["a?"], False)
+        assert summary is None
+        assert board is not None
+        assert generate.prompts == []
+        assert prefill.call_count == 1
+
+    def test_no_questions_means_no_board(self) -> None:
+        summary, board, _, _, _, model = self._run([], True)
+        assert summary == VALID_SUMMARY
+        assert board is None
+        # One forward pass, the prefill: the summary is generate_step's.
+        assert model.call_count == 1
+
+
+def test_sorted_board_ranks_highest_first_and_keeps_ties_in_order() -> None:
+    board = [("a", 0.2), ("b", 0.9), ("c", 0.2), ("d", 0.5)]
+    assert sorted_board(board) == [("b", 0.9), ("d", 0.5), ("a", 0.2), ("c", 0.2)]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("plain words", "plain words"),
+        ("![x](http://e.invalid/i)", r"\!\[x\](http://e.invalid/i)"),
+        ("<img src=x>", r"\<img src=x\>"),
+        ("a | b", r"a \| b"),
+        ("*bold* _it_ `code` ~s~ #h", r"\*bold\* \_it\_ \`code\` \~s\~ \#h"),
+        ("back\\slash", "back\\\\slash"),
+        ("two\nlines\n\n  spaced", "two lines spaced"),
+    ],
+)
+def test_escape_markdown(text: str, expected: str) -> None:
+    assert _escape_markdown(text) == expected
+
+
+def test_analysis_markdown_is_the_exact_file() -> None:
+    summary = {
+        "topic": "Launch [plan]",
+        "summary": "See ![x](http://e.invalid/i)\nnow.",
+        "topics": ["budget", "a|b"],
+        "action_items": [],
+    }
+    board = [("Is it late?", 0.25), ("Any <b>money</b>?", 0.75)]
+    assert analysis_markdown(summary, board) == (  # ty: ignore[invalid-argument-type]
+        "# Analysis\n"
+        "\n"
+        "Topic: Launch \\[plan\\]\n"
+        "\n"
+        "## Summary\n"
+        "\n"
+        "See \\!\\[x\\](http://e.invalid/i) now.\n"
+        "\n"
+        "## Key topics\n"
+        "\n"
+        "- budget\n"
+        "- a\\|b\n"
+        "\n"
+        "## Action items\n"
+        "\n"
+        "None.\n"
+        "\n"
+        "## Questions\n"
+        "\n"
+        f"{BOARD_CAPTION}\n"
+        "\n"
+        "| Question | P(yes) |\n"
+        "| --- | --- |\n"
+        "| Any \\<b\\>money\\</b\\>? | 0.75 |\n"
+        "| Is it late? | 0.25 |\n"
+    )
+
+
+def test_analysis_markdown_without_a_board_has_no_questions_section() -> None:
+    text = analysis_markdown(VALID_SUMMARY, None)  # ty: ignore[invalid-argument-type]
+    assert "## Questions" not in text
+    assert text.endswith("## Action items\n\nNone.\n")
+
+
+class TestInferenceTurn:
+    def test_the_lock_is_one_object_per_process(self) -> None:
+        assert inference_lock() is inference_lock()
+
+    def test_holds_the_lock_inside_and_releases_it_after(self) -> None:
+        lock = threading.Lock()
+        on_wait = MagicMock()
+        with _inference_turn(lock, on_wait):
+            assert lock.locked()
+        assert not lock.locked()
+        on_wait.assert_not_called()
+
+    def test_releases_the_lock_when_the_body_raises(self) -> None:
+        lock = threading.Lock()
+        with pytest.raises(RuntimeError), _inference_turn(lock, MagicMock()):
+            raise RuntimeError
+        assert not lock.locked()
+
+    def test_reports_each_poll_while_another_run_holds_it(self) -> None:
+        # A bare acquire() would block with no st.* call, so a waiting run
+        # could not be stopped; each on_wait is where Streamlit can stop it.
+        lock = threading.Lock()
+        lock.acquire()
+        waits = []
+
+        def on_wait() -> None:
+            waits.append(1)
+            if len(waits) == 2:
+                lock.release()  # the other run finishes
+
+        with (
+            patch("streamlit_app.INFERENCE_LOCK_POLL_S", 0.01),
+            _inference_turn(lock, on_wait),
+        ):
+            assert lock.locked()
+        assert len(waits) == 2
+        assert not lock.locked()
+
+
+@pytest.mark.parametrize(
+    ("found", "cached"),
+    [("/hub/snapshot/model.safetensors", True), (None, False), (object(), False)],
+)
+def test_llm_is_cached(found: object, cached: bool) -> None:
+    with patch("streamlit_app.try_to_load_from_cache", return_value=found) as lookup:
+        assert llm_is_cached() is cached
+    lookup.assert_called_once_with(LLM_ID, "model.safetensors", revision=LLM_REVISION)
+
+
+@pytest.mark.parametrize(
+    ("cleaned", "captions"),
+    [
+        (CleanedQuestions(["a?"], 0, 0, 0), []),
+        (
+            CleanedQuestions([], 1, 2, 0),
+            [
+                "1 question was skipped for being longer than 200 characters.",
+                "2 questions were skipped because they contain \\<|.",
+            ],
+        ),
+        (
+            CleanedQuestions(["a?"], 0, 0, 3),
+            ["Only the first 20 questions are scored; 3 questions were skipped."],
+        ),
+    ],
+)
+def test_skipped_questions_captions(
+    cleaned: CleanedQuestions, captions: list[str]
+) -> None:
+    assert _skipped_questions_captions(cleaned) == captions
+
+
+@patch("streamlit_app.st")
+class TestRenderAnalysisCard:
+    SUMMARY: ClassVar[dict] = {
+        "topic": "![t](http://e.invalid/i)",
+        "summary": "s",
+        "topics": ["a", "b"],
+        "action_items": ["do x", "do y"],
+    }
+
+    def _render(self, board: list | None = None, download: bool = True) -> Any:
+        return _render_analysis_card(
+            self.SUMMARY,  # ty: ignore[invalid-argument-type]
+            board,
+            "talk",
+            download,
+        )
+
+    def test_model_text_goes_through_st_text_only(self, mock_st: MagicMock) -> None:
+        self._render()
+        assert [c.args[0] for c in mock_st.text.call_args_list] == [
+            "![t](http://e.invalid/i)",
+            "s",
+            "a · b",
+            "• do x\n• do y",
+        ]
+        # Markdown is the app's fixed labels and nothing the model wrote.
+        assert [c.args[0] for c in mock_st.markdown.call_args_list] == [
+            "**Topic**",
+            "**Summary**",
+            "**Key topics**",
+            "**Action items**",
+            "**Questions**",
+        ]
+        mock_st.success.assert_not_called()
+        mock_st.warning.assert_not_called()
+
+    def test_header_row_carries_the_markdown_download(self, mock_st: MagicMock) -> None:
+        self._render(board=[("q?", 0.5)])
+        assert mock_st.container.call_args_list == [
+            call(border=True),
+            call(horizontal=True, vertical_alignment="center"),
+        ]
+        names = [name for name, _a, _k in mock_st.mock_calls]
+        assert names[:7] == [
+            "container",
+            "container().__enter__",
+            "container",
+            "container().__enter__",
+            "subheader",
+            "space",
+            "download_button",
+        ]
+        args, kwargs = mock_st.download_button.call_args
+        # A real label, for the same accessible-name reason as dl_txt.
+        assert args == (
+            "Download",
+            analysis_markdown(
+                self.SUMMARY,  # ty: ignore[invalid-argument-type]
+                [("q?", 0.5)],
+            ),
+            "talk_analysis.md",
+            "text/markdown",
+        )
+        assert kwargs == {
+            "key": "dl_md",
+            "icon": ":material/download:",
+            "help": "Download analysis",
+            "on_click": "ignore",
+        }
+
+    def test_a_card_drawn_mid_run_has_no_download(self, mock_st: MagicMock) -> None:
+        self._render(download=False)
+        mock_st.download_button.assert_not_called()
+
+    def test_without_a_board_the_placeholder_is_left_empty(
+        self, mock_st: MagicMock
+    ) -> None:
+        area = self._render()
+        assert area is mock_st.empty.return_value
+        area.container.assert_not_called()
+        mock_st.progress.assert_not_called()
+
+    def test_the_board_is_sorted_with_its_caption(self, mock_st: MagicMock) -> None:
+        # A question is the user's text in a Markdown label, so it is escaped.
+        self._render(board=[("low?", 0.1), ("*high*?", 0.9)])
+        # One native bar per row, number first, highest first; the number is
+        # printed so the value does not rest on bar length alone.
+        assert mock_st.progress.call_args_list == [
+            call(0.9, text="**0.90** · \\*high\\*?"),
+            call(0.1, text="**0.10** · low?"),
+        ]
+        mock_st.caption.assert_called_once_with(BOARD_CAPTION)
+        mock_st.dataframe.assert_not_called()
+
+    def test_empty_lists_say_none(self, mock_st: MagicMock) -> None:
+        summary = {"topic": "t", "summary": "s", "topics": [], "action_items": []}
+        _render_analysis_card(summary, None, "x")  # ty: ignore[invalid-argument-type]
+        assert mock_st.caption.call_args_list == [call("None."), call("None.")]
+        assert [c.args[0] for c in mock_st.text.call_args_list] == ["t", "s"]
 
 
 def _tiny_granite() -> Any:
@@ -1910,7 +2123,7 @@ class TestGraniteLlmContract:
         ):
             summarize_transcript(model, tokenizer, prefill)
         assert prefill.cache[0].offset == len(prefill.ids)
-        question = [_ROLE_IDS["user"], *tokens("question?"), _END_ID, _GEN_ID]
+        question = [ROLE_IDS["user"], *tokens("question?"), END_ID, GEN_ID]
         reused = _last_logits(model, question, prefill.cache)
         again = prefill_transcript(model, tokenizer, "a short transcript")
         assert mx.allclose(
@@ -1921,7 +2134,7 @@ class TestGraniteLlmContract:
         # Question B after question A and its trim equals B on a fresh prefill:
         # the trim restores the cache exactly. Drop it and B reads A's turn.
         model, tokenizer = _tiny_granite(), FakeTokenizer()
-        answer_ids = (_YES_ID, _NO_ID)
+        answer_ids = (YES_ID, NO_ID)
         prefill = prefill_transcript(model, tokenizer, "a short transcript")
         score_question(model, tokenizer, prefill, "question a?", answer_ids)
         after_a = score_question(model, tokenizer, prefill, "question b?", answer_ids)

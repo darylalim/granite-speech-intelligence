@@ -16,8 +16,11 @@ import errno
 import io
 import json
 import math
+import re
+import threading
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, NamedTuple, TypedDict
@@ -27,6 +30,7 @@ import mlx.core as mx
 import streamlit as st
 import torch
 import torchaudio
+from huggingface_hub import try_to_load_from_cache
 from huggingface_hub.constants import HF_HUB_CACHE
 from huggingface_hub.errors import LocalEntryNotFoundError
 from mlx import nn
@@ -257,6 +261,25 @@ SUMMARY_RETRY_PROMPT = (
     "That was not a valid JSON object with the keys topic, summary, topics and "
     "action_items. Return only that JSON object."
 )
+# The board's canonical caption (PLAN.md, Phase 2). It says how the rows are
+# sorted, which a screen-reader user cannot see from the bar lengths, and it
+# says what the numbers are: the evaluation found P(yes) leaning towards No,
+# with 26-29% of answers under 0.2 labelled yes, so they rank, never decide.
+BOARD_CAPTION = (
+    "Sorted by P(yes), highest first. Scores rank the questions; they aren't verdicts."
+)
+# Heights the skeletons reserve while an analysis runs, so the transcript card
+# below does not jump when the real card replaces them. Measured on a 2-minute
+# meeting with the 9 default questions, dark theme (2026-10-21): the card is
+# 1148px at a 1470px window with the sidebar open, 611px of it above the
+# "Questions" label and each board row a 35px bar plus a 16px gap. The summary
+# part varies with the model's wording and the width (535px at 720px wide,
+# 765px at 322px), so it is a typical figure, not a bound.
+ANALYSIS_SUMMARY_HEIGHT_PX = 660
+BOARD_ROW_HEIGHT_PX = 51
+# How long a waiting run blocks on the inference lock between st.* calls: each
+# call is a point where a rerun can stop the wait.
+INFERENCE_LOCK_POLL_S = 0.5
 
 
 class Segment(TypedDict):
@@ -292,6 +315,9 @@ class TranscriptPrefill(NamedTuple):
     ids: list[int]
     messages: list[dict[str, str]]
 
+
+# (question, P(yes)) in the user's order; the board's rendering sorts.
+type Board = list[tuple[str, float]]
 
 # (upload file_id, record file_id, "upload" | "record" | None) carried across
 # reruns in st.session_state so select_source can see what changed.
@@ -994,7 +1020,7 @@ def answer_questions(
     prefill: TranscriptPrefill,
     questions: list[str],
     on_progress: Callable[[int, int, str], None] | None = None,
-) -> list[tuple[str, float]]:
+) -> Board:
     """P(yes) for each question, in the user's order (the UI sorts).
 
     Continues from the transcript cache, after summarize_transcript has
@@ -1005,7 +1031,7 @@ def answer_questions(
     """
     assert can_trim_prompt_cache(prefill.cache), "the transcript cache must trim"
     answer_ids = _yes_no_ids(tokenizer)
-    board: list[tuple[str, float]] = []
+    board: Board = []
     for i, question in enumerate(questions):
         if on_progress:
             on_progress(i, len(questions), f"question {i + 1} of {len(questions)}")
@@ -1265,6 +1291,138 @@ def summarize_transcript(
     raise RuntimeError("The summary could not be read; the model did not return JSON.")
 
 
+def run_analysis(
+    model: Any,
+    tokenizer: Any,
+    transcript: str,
+    questions: list[str],
+    summarise: bool,
+    on_progress: Callable[[float, str], None] | None = None,
+) -> tuple[Summary | None, Board | None]:
+    """Whatever is asked for, from one prefill: `(summary, board)`.
+
+    `summarise=False` is the board-only run after the questions change; an
+    empty `questions` list skips the board. Either part not run comes back
+    None. on_progress gets `(fraction, label)` per stage, the label already
+    worded for the progress bar.
+    """
+
+    def stage(label: str) -> Callable[[int, int, str], None] | None:
+        if on_progress is None:
+            return None
+        report = on_progress
+
+        def update(i: int, n: int, unit: str) -> None:
+            report(i / n, label.format(unit=unit))
+
+        return update
+
+    prefill = prefill_transcript(
+        model, tokenizer, transcript, stage("Reading transcript ({unit})...")
+    )
+    summary = (
+        summarize_transcript(model, tokenizer, prefill, stage("Summarising..."))
+        if summarise
+        else None
+    )
+    board = (
+        answer_questions(
+            model, tokenizer, prefill, questions, stage("Answering {unit}...")
+        )
+        if questions
+        else None
+    )
+    return summary, board
+
+
+def sorted_board(board: Board) -> Board:
+    # Stable, so equal scores keep the user's order.
+    return sorted(board, key=lambda row: row[1], reverse=True)
+
+
+# Everything that can open Markdown syntax mid-line: emphasis, code, links and
+# images (`[`, `!`), raw HTML and autolinks (`<`), table cells (`|`), and the
+# escape itself. Line-start syntax (`#`, `-`, `1.`) cannot arise, since every
+# field is placed after a fixed prefix or is a paragraph of its own whose
+# whitespace is collapsed; `#` is escaped anyway for the paragraph case.
+_MARKDOWN_SPECIAL = re.compile(r"([\\`*_\[\]!<>|#~])")
+
+
+def _escape_markdown(text: str) -> str:
+    return _MARKDOWN_SPECIAL.sub(r"\\\1", " ".join(text.split()))
+
+
+def analysis_markdown(summary: Summary, board: Board | None) -> str:
+    """The analysis as a Markdown file, every model field escaped.
+
+    The file leaves the app, and a Markdown viewer would otherwise turn an
+    image the transcript dictated into a fetch (PLAN.md, Security, rule 1).
+    The questions are escaped too: they are user text, and a `|` in one
+    would split its table row.
+    """
+    lines = [
+        "# Analysis",
+        "",
+        f"Topic: {_escape_markdown(summary['topic'])}",
+        "",
+        "## Summary",
+        "",
+        _escape_markdown(summary["summary"]),
+        "",
+        "## Key topics",
+        "",
+        *([f"- {_escape_markdown(t)}" for t in summary["topics"]] or ["None."]),
+        "",
+        "## Action items",
+        "",
+        *([f"- {_escape_markdown(a)}" for a in summary["action_items"]] or ["None."]),
+    ]
+    if board is not None:
+        lines += ["", "## Questions", "", BOARD_CAPTION, "", "| Question | P(yes) |"]
+        lines += ["| --- | --- |"]
+        lines += [
+            f"| {_escape_markdown(q)} | {p:.2f} |" for q, p in sorted_board(board)
+        ]
+    return "\n".join(lines) + "\n"
+
+
+@st.cache_resource(show_spinner=False)
+def inference_lock() -> threading.Lock:
+    """One model inference at a time, across every session in the process.
+
+    Each browser tab is its own script thread and shares the cached models,
+    so two analyses would hold two KV caches (~2 GB more at the token cap) and
+    drive one MLX model from two threads, which is untested. Transcription
+    takes it too, having the same exposure. Never held while a model loads:
+    a first-use download under it would stall every other tab for minutes.
+    """
+    return threading.Lock()
+
+
+@contextmanager
+def _inference_turn(
+    lock: threading.Lock, on_wait: Callable[[], None]
+) -> Generator[None]:
+    # A timed wait in a loop, not a bare acquire(): on_wait makes an st.* call
+    # each time round, which is where Streamlit can stop a waiting run on a
+    # rerun. The finally releases on its StopException too, which is a
+    # BaseException that `except Exception` would not see.
+    while not lock.acquire(timeout=INFERENCE_LOCK_POLL_S):
+        on_wait()
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+def llm_is_cached() -> bool:
+    # A local lookup only: with a full commit hash it never touches the
+    # network. Anything but a path (None, or the "known missing" sentinel)
+    # means the first analysis downloads the model.
+    path = try_to_load_from_cache(LLM_ID, "model.safetensors", revision=LLM_REVISION)
+    return isinstance(path, str)
+
+
 def _labeled_toggle(label: str, help: str, key: str, value: bool = True) -> bool:
     # A settings row: bold label left, switch right. A horizontal container
     # with a stretch space between them rather than st.columns([15, 1]): in
@@ -1311,6 +1469,236 @@ def _render_result_card(result: PipelineResult, stem: str) -> None:
         st.text(transcript)
 
 
+def _board_height(questions: int) -> int:
+    # One bar per question, then the caption's line under them.
+    return questions * BOARD_ROW_HEIGHT_PX + 32
+
+
+def _render_board(board: Board) -> None:
+    # One native progress bar per question, not st.dataframe with a
+    # ProgressColumn: dataframe cells clip rather than wrap, and in the 322px
+    # and 421px cards (1024px with the sidebar open, 760px) the score column
+    # was pushed out of view. A bar's label wraps at any width, and the bar
+    # exposes its value to a screen reader where the canvas grid may not.
+    # The number leads the label so the sorted scores line up down the left
+    # edge, and is printed so the value never rests on bar length alone. The
+    # questions are the user's own text, escaped because the label is
+    # Markdown.
+    for question, p_yes in sorted_board(board):
+        st.progress(
+            min(max(p_yes, 0.0), 1.0),
+            text=f"**{p_yes:.2f}** · {_escape_markdown(question)}",
+        )
+    st.caption(BOARD_CAPTION)
+
+
+def _render_analysis_card(
+    summary: Summary, board: Board | None, stem: str, download: bool = True
+) -> Any:
+    """The Analysis card; returns the placeholder where the board goes.
+
+    Every field the model wrote goes through st.text, never st.markdown: a
+    transcript can carry spoken instructions, and a Markdown image in a
+    summary would make the browser fetch a URL with no click (PLAN.md,
+    Security, rule 1). The bold labels are the app's own fixed strings. When
+    `board` is None the placeholder is left for the caller, which puts the
+    skeleton, the "Analyse" button or the no-questions caption there.
+    `download=False` is for the card drawn while its board is being scored:
+    the final draw in the same run carries the button, and a widget key can
+    be registered only once per run.
+    """
+    with st.container(border=True):
+        # Laid out like the transcript card's header, for the same reasons.
+        with st.container(horizontal=True, vertical_alignment="center"):
+            st.subheader("Analysis")
+            st.space("stretch")
+            if download:
+                st.download_button(
+                    "Download",
+                    analysis_markdown(summary, board),
+                    f"{stem}_analysis.md",
+                    "text/markdown",
+                    key="dl_md",
+                    icon=":material/download:",
+                    help="Download analysis",
+                    on_click="ignore",
+                )
+        st.markdown("**Topic**")
+        st.text(summary["topic"])
+        st.markdown("**Summary**")
+        st.text(summary["summary"])
+        st.markdown("**Key topics**")
+        if summary["topics"]:
+            st.text(" · ".join(summary["topics"]))
+        else:
+            st.caption("None.")
+        st.markdown("**Action items**")
+        if summary["action_items"]:
+            st.text("\n".join(f"• {item}" for item in summary["action_items"]))
+        else:
+            st.caption("None.")
+        st.markdown("**Questions**")
+        board_area = st.empty()
+        if board is not None:
+            with board_area.container():
+                _render_board(board)
+    return board_area
+
+
+# Everything a run produces, dropped together when the input changes or a new
+# Transcribe starts. Session state only: nothing is written to disk.
+_RESULT_KEYS = ("result", "result_stem", "summary", "board", "_board_key")
+
+
+def _waiting(progress: Any) -> Callable[[], None]:
+    def on_wait() -> None:
+        progress.progress(0, text="Waiting for another run to finish...")
+
+    return on_wait
+
+
+def _request_analysis() -> None:
+    # A callback rather than the button's return value: the click has to be
+    # known before the slot the button sits in is drawn.
+    st.session_state["_analyse_requested"] = True
+
+
+def _analysis_section(
+    *,
+    feedback: Any,
+    analysis_slot: Any,
+    questions: list[str],
+    board_key: tuple[Any, ...],
+    run: bool,
+) -> None:
+    """Fill the analysis slot, running whatever is missing when `run` is set.
+
+    The transcript card is already on screen below, so nothing here can lose
+    it: every failure is caught and shown in this slot, and the function
+    returns rather than ending main() the way a transcription error does.
+    """
+    state = st.session_state
+    transcript = segments_text(state.result["segments"])
+    if not transcript:
+        # Summarising nothing would only invent content.
+        analysis_slot.caption("No speech to analyse.")
+        return
+
+    need_summary = "summary" not in state
+    need_board = bool(questions) and "board" not in state
+    show_error: Callable[[], None] | None = None
+    if run and (need_summary or need_board):
+        # Reserve the card's space (or, on a board-only run, the board's) so
+        # the transcript below does not move when the result lands.
+        if need_summary:
+            analysis_slot.skeleton(
+                height=ANALYSIS_SUMMARY_HEIGHT_PX + _board_height(len(questions))
+            )
+        else:
+            with analysis_slot.container():
+                _render_analysis_card(
+                    state.summary, None, state.result_stem, download=False
+                ).skeleton(height=_board_height(len(questions)))
+        try:
+            # Before the load: the exact count needs the tokenizer, which
+            # comes with the 3.9 GB model, and a hopeless length should not
+            # wait behind a download.
+            check_analysis_length(transcript)
+            # In the feedback placeholder, where the bar then takes over: the
+            # slot's end is under the transcript card, off screen for a long
+            # one. show_time because a cold fetch took 110s in B3.
+            with (
+                feedback.container(),
+                st.spinner("Loading language model...", show_time=True),
+            ):
+                model, tokenizer = load_llm(LLM_ID, LLM_REVISION)
+            progress = feedback.progress(0, text="Starting analysis...")
+
+            def update_progress(fraction: float, label: str) -> None:
+                progress.progress(fraction, text=label)
+
+            with _inference_turn(inference_lock(), on_wait=_waiting(progress)):
+                summary, board = run_analysis(
+                    model,
+                    tokenizer,
+                    transcript,
+                    questions if need_board else [],
+                    summarise=need_summary,
+                    on_progress=update_progress,
+                )
+            if summary is not None:
+                state["summary"] = summary
+            if board is not None:
+                state["board"] = board
+                state["_board_key"] = board_key
+        except RuntimeError as e:
+            message = str(e)
+
+            def show_error() -> None:
+                st.error(message, icon=":material/error:")
+        except Exception as e:  # noqa: BLE001 - the analysis's own boundary
+            error = e
+
+            def show_error() -> None:
+                st.exception(error)
+        finally:
+            feedback.empty()
+        if show_error is None:
+            # The card adds no st.success banner either, matching the
+            # transcript's: the toast is the completion signal.
+            st.toast("Analysis complete", icon=":material/check_circle:")
+
+    with analysis_slot.container():
+        if "summary" in state:
+            board_area = _render_analysis_card(
+                state.summary, state.get("board"), state.result_stem
+            )
+            if "board" not in state:
+                with board_area.container():
+                    if not questions:
+                        st.caption("Add at least one question to score.")
+                    else:
+                        st.caption("Press Analyse to score these questions.")
+                        _analyse_button()
+        else:
+            _analyse_button()
+        if show_error is not None:
+            show_error()
+
+
+def _analyse_button() -> None:
+    st.button(
+        "Analyse",
+        key="analyse",
+        type="secondary",
+        icon=":material/summarize:",
+        on_click=_request_analysis,
+    )
+
+
+def _skipped_questions_captions(cleaned: CleanedQuestions) -> list[str]:
+    def count(n: int) -> str:
+        return f"{n} question{'' if n == 1 else 's'} {'was' if n == 1 else 'were'}"
+
+    captions = []
+    if cleaned.too_long:
+        captions.append(
+            f"{count(cleaned.too_long)} skipped for being longer than "
+            f"{MAX_QUESTION_CHARS} characters."
+        )
+    if cleaned.special:
+        contain = "it contains" if cleaned.special == 1 else "they contain"
+        # Escaped rather than in backticks: inline code would take the theme's
+        # unreviewed code colours (the config sets no code keys).
+        captions.append(f"{count(cleaned.special)} skipped because {contain} \\<|.")
+    if cleaned.over_limit:
+        captions.append(
+            f"Only the first {MAX_QUESTIONS} questions are scored; "
+            f"{count(cleaned.over_limit)} skipped."
+        )
+    return captions
+
+
 def main() -> None:
     st.set_page_config(
         page_title="Granite Speech Intelligence",
@@ -1327,6 +1715,18 @@ def main() -> None:
                 "Silero VAD. Disable to process the whole audio in one pass."
             ),
             key="use_segmentation",
+        )
+        # Off by default: it adds a 3.9 GB model and ~4 GB of memory, so the
+        # default app stays what it was without it. The size is in the help
+        # text and, until it is cached, in a caption beside the button.
+        use_analysis = _labeled_toggle(
+            "Transcript analysis",
+            help=(
+                "Summarises the transcript and answers yes/no questions with a "
+                "local Granite 4.2 3B model (~4 GB download on first use)."
+            ),
+            key="use_analysis",
+            value=False,
         )
         # "English only" is the one thing a user needs to know before uploading:
         # the model transcribes anything into confident lowercase English-shaped
@@ -1345,6 +1745,11 @@ def main() -> None:
             f":small[Model: [{MODEL_ID}](https://huggingface.co/{MODEL_ID}) "
             "· English only]"
         )
+        if use_analysis:
+            # :small[], not st.caption, for the contrast reason above.
+            st.markdown(
+                f":small[Analysis model: [{LLM_ID}](https://huggingface.co/{LLM_ID})]"
+            )
 
     page = st.container(horizontal_alignment="center").container(
         width=LAYOUT_MAX_WIDTH_PX
@@ -1424,13 +1829,49 @@ def main() -> None:
             width="stretch",
         )
 
+        cleaned = CleanedQuestions([], 0, 0, 0)
+        if use_analysis:
+            # Here rather than only in the toggle's tooltip, which hides the
+            # size from anyone who doesn't hover.
+            if not llm_is_cached():
+                st.caption(
+                    "The first analysis downloads the language model (about 4 GB)."
+                )
+            # In main, under the button, because the run depends on them.
+            with st.expander("Analysis questions"):
+                # persist_state="session": without it the value is dropped
+                # whenever analysis is off and the box is not rendered, so
+                # toggling back on would reset the questions and the board.
+                text = st.text_area(
+                    "Questions",
+                    value="\n".join(DEFAULT_QUESTIONS),
+                    help="One yes/no question per line.",
+                    key="questions",
+                    persist_state="session",
+                    max_chars=MAX_QUESTIONS * MAX_QUESTION_CHARS,
+                    # The nine defaults without a scrollbar at 388px (a
+                    # 1470px laptop, sidebar open); the stock box shows three.
+                    height=240,
+                )
+                cleaned = clean_questions(text or "")
+                for caption in _skipped_questions_captions(cleaned):
+                    st.caption(caption)
+
     # file_id rather than (name, size): a re-exported file or a second recording
     # of the same length would otherwise keep the previous transcript on screen.
     input_key = (audio_file.file_id, use_segmentation) if audio_file else None
     if input_key != st.session_state.get("_last_input_key"):
-        for key in ("result", "result_stem"):
+        for key in _RESULT_KEYS:
             st.session_state.pop(key, None)
         st.session_state["_last_input_key"] = input_key
+    # The board is keyed by the questions as well, so editing one drops the
+    # board alone and the summary — the slow part — survives. Only while
+    # analysis is on: with it off the box is not read, and an empty question
+    # list would drop a board the user never changed.
+    board_key = (input_key, tuple(cleaned.questions))
+    if use_analysis and st.session_state.get("_board_key") not in (None, board_key):
+        for key in ("board", "_board_key"):
+            st.session_state.pop(key, None)
 
     # Everything that answers "where is my transcript?" lands in this one slot:
     # the next-step hint, the progress bar and spinners during a run, an error,
@@ -1444,7 +1885,13 @@ def main() -> None:
     # layout and keeps the card at a fixed index the way the two-column grid
     # keeps everything else fixed.
     feedback = transcript_slot.empty()
+    # The second placeholder, for the same reason: the Analysis card, its
+    # skeleton, the "Analyse" button and analysis errors all land here, and
+    # reserving it in every state keeps the transcript card at index 2 with
+    # analysis on or off, so flipping the toggle never remounts it.
+    analysis_slot = transcript_slot.empty()
 
+    transcribed = False
     if run_clicked and can_run:
         assert audio_file is not None
         # Drop the previous run's result before starting, not after succeeding.
@@ -1454,7 +1901,7 @@ def main() -> None:
         # the next rerun, reading as though the retry had succeeded. Popping
         # up front makes failure leave nothing behind; success overwrites both
         # keys below, so the happy path is unchanged.
-        for stale in ("result", "result_stem"):
+        for stale in _RESULT_KEYS:
             st.session_state.pop(stale, None)
         with transcript_slot:
             progress = feedback.progress(0, text="Starting transcription...")
@@ -1484,13 +1931,14 @@ def main() -> None:
                 def update_progress(i: int, total: int, label: str) -> None:
                     progress.progress(i / total, text=f"Transcribing {label}...")
 
-                st.session_state.result = run_pipeline(
-                    wav,
-                    model,
-                    vad_model,
-                    on_progress=update_progress,
-                    use_segmentation=use_segmentation,
-                )
+                with _inference_turn(inference_lock(), on_wait=_waiting(progress)):
+                    st.session_state.result = run_pipeline(
+                        wav,
+                        model,
+                        vad_model,
+                        on_progress=update_progress,
+                        use_segmentation=use_segmentation,
+                    )
                 if from_upload:
                     stem = Path(audio_file.name).stem
                 else:
@@ -1511,8 +1959,12 @@ def main() -> None:
                 feedback.empty()
         # The card carries no st.success banner by design, so this toast is
         # the only success signal; an icon is what makes it read as one.
+        # Before any analysis, so an analysis failure cannot swallow it.
         st.toast("Transcription complete", icon=":material/check_circle:")
+        transcribed = True
 
+    # Drawn before any analysis runs, so the transcript is on screen while the
+    # analysis works above it — and drawn here only, so a run draws it once.
     with transcript_slot:
         # Captions, not alerts: they sit where the card will appear. Nothing
         # while Run is blocked — the warning beside the button says why.
@@ -1525,6 +1977,19 @@ def main() -> None:
                 "Press Transcribe. The transcript appears here, one timestamped "
                 "line per segment."
             )
+
+    requested = st.session_state.pop("_analyse_requested", False)
+    if use_analysis and "result" in st.session_state:
+        _analysis_section(
+            feedback=feedback,
+            analysis_slot=analysis_slot,
+            questions=cleaned.questions,
+            board_key=board_key,
+            # A Transcribe with analysis on analyses straight after; turning
+            # analysis on (or editing questions) after a transcript exists
+            # waits for "Analyse", so it never re-transcribes on its own.
+            run=transcribed or requested,
+        )
 
 
 if __name__ == "__main__":
