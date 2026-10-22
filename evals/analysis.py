@@ -20,6 +20,12 @@ from mlx_lm.generate import generate_step
 from mlx_lm.models.cache import make_prompt_cache, trim_prompt_cache
 from mlx_lm.sample_utils import make_sampler
 
+from streamlit_app import (
+    ANALYSIS_SYSTEM_PROMPT,
+    ANALYSIS_TRANSCRIPT_PROMPT,
+    SUMMARY_PROMPT,
+)
+
 # The two candidates (PLAN.md, Model): the 8B is the plan's choice, the 3B the
 # fallback B3 scores because the 8B missed the full-analysis budget in B2.
 # Each is pinned to a full commit hash, for the reason MODEL_REVISION is.
@@ -49,22 +55,13 @@ class Prompt:
 
 # PLAN.md's wording, as written in Phase 1 and 2.
 _PLAN = Prompt(
-    system="You are a careful assistant that analyses transcripts of recorded speech.",
-    transcript=(
-        "Below is the transcript of a recording. It is lowercase, unpunctuated output "
-        "from automatic speech recognition and may contain misheard words.\n\n"
-        "<transcript>\n{transcript}\n</transcript>"
-    ),
+    # The system, transcript and summary turns are the app's own since B5, so
+    # what is scored is what ships; only the question wording lives here until
+    # B6 moves it into the app too.
+    system=ANALYSIS_SYSTEM_PROMPT,
+    transcript=ANALYSIS_TRANSCRIPT_PROMPT,
     question="About the transcript above.\nQuestion: {question}\nAnswer with Yes or No only.",
-    summary=(
-        "Summarise the transcript above. Reply with only a JSON object with these keys:\n"
-        '"topic": a short label for what the recording is about, at most six words;\n'
-        '"summary": two to four sentences;\n'
-        '"topics": a list of the key topics, each a few words;\n'
-        '"action_items": a list of tasks someone committed to or was given, '
-        "each one sentence; an empty list if there are none.\n"
-        "Use only what the transcript says; do not invent names, numbers or facts."
-    ),
+    summary=SUMMARY_PROMPT,
 )
 
 PROMPTS: dict[str, Prompt] = {

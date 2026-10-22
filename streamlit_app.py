@@ -12,22 +12,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import errno
 import io
+import json
 import math
 import warnings
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, NamedTuple, TypedDict
 
 import av
 import mlx.core as mx
 import streamlit as st
 import torch
 import torchaudio
+from huggingface_hub.constants import HF_HUB_CACHE
+from huggingface_hub.errors import LocalEntryNotFoundError
 from mlx import nn
 from mlx_audio.stt.utils import load_model as _load_stt_model
 from mlx_audio.vad.utils import load_model as _load_mlx_vad_model
+from mlx_lm import load as _load_llm
+from mlx_lm.generate import generate_step
+from mlx_lm.models.cache import make_prompt_cache, trim_prompt_cache
+from mlx_lm.sample_utils import make_sampler
 from silero_vad import get_speech_timestamps, load_silero_vad
 from streamlit.runtime.uploaded_file_manager import UploadedFile
 
@@ -159,9 +167,95 @@ TRANSCRIPT_MAX_WIDTH_PX = 720
 # ~736px is too narrow for two columns.
 LAYOUT_MAX_WIDTH_PX = 1280
 
+# Transcript analysis: Granite 4.2 3B, IBM's own 8-bit MLX conversion. Chosen
+# over the 8B q4 at PLAN.md's B4 on measurement: on ASR transcripts it ranks
+# yes/no answers 3-4 points of ROC-AUC lower (0.76 vs 0.79 pooled, held out)
+# and analyses 30 minutes in 22.6s against 44.8s, the 8B's miss being prefill
+# compute, which no memory setting could fix.
+LLM_ID = "ibm-granite/granite-4.2-3b-q8-mlx"
+# Pinned for MODEL_REVISION's reason — strict loading proves keys are present,
+# not that they are the weights the evaluation scored — and for one more: the
+# chat template is code that runs (in transformers' Jinja sandbox), and the
+# hash is the only thing vouching for it. Moving the pin means reading the
+# template diff and re-running `evals`.
+LLM_REVISION = "8e19ac6574124635eb8fbd06a15d05ebbfff82dd"
+# Longest transcript prefix analysed, about two hours of meeting speech (206
+# tokens a minute on app output). Set by memory, the hard constraint: the
+# whole-process peak with the speech model resident measured 8.13 GB at 13.1K
+# tokens, 9.31 GB at 26.2K and 10.18 GB at 39.2K, so ~9.2 GB here, under the
+# ~10 GB past which a 16 GB Mac swaps. A full analysis at the cap takes ~85s.
+MAX_ANALYSIS_TOKENS = 24_576
+# Prefix tokens per transcript word, measured on app output (1.161 with the
+# timestamps, which are stripped). Drives the pre-check that refuses a
+# hopeless transcript before the 3.9 GB model is loaded to count it exactly.
+ANALYSIS_TOKENS_PER_WORD = 1.072
+# The measured summaries run 190-210 tokens; this leaves room for a long one
+# without letting a runaway generation run for long.
+ANALYSIS_MAX_NEW_TOKENS = 512
+# Prefill chunk. Each chunk is preceded by an on_progress call, which is also
+# where a Streamlit rerun can stop the analysis (mlx_lm's default step size).
+ANALYSIS_PREFILL_TOKENS = 2048
+# Summary tokens between on_progress calls, for the same reason.
+ANALYSIS_PROGRESS_TOKENS = 32
+# The prompt the evaluation chose (`evals`, "anyone"; PLAN.md, B3). The
+# transcript turn is identical for every task so its prefill is shared; the
+# caveat is the one IBM's Speech to Decisions Space gives. Change a word here
+# and the recorded scores no longer describe the app: re-run the evaluation.
+ANALYSIS_SYSTEM_PROMPT = (
+    "You are a careful assistant that analyses transcripts of recorded speech."
+)
+ANALYSIS_TRANSCRIPT_PROMPT = (
+    "Below is the transcript of a recording. It is lowercase, unpunctuated output "
+    "from automatic speech recognition and may contain misheard words.\n\n"
+    "<transcript>\n{transcript}\n</transcript>"
+)
+SUMMARY_PROMPT = (
+    "Summarise the transcript above. Reply with only a JSON object with these keys:\n"
+    '"topic": a short label for what the recording is about, at most six words;\n'
+    '"summary": two to four sentences;\n'
+    '"topics": a list of the key topics, each a few words;\n'
+    '"action_items": a list of tasks someone committed to or was given, '
+    "each one sentence; an empty list if there are none.\n"
+    "Use only what the transcript says; do not invent names, numbers or facts."
+)
+SUMMARY_RETRY_PROMPT = (
+    "That was not a valid JSON object with the keys topic, summary, topics and "
+    "action_items. Return only that JSON object."
+)
+
+
+class Segment(TypedDict):
+    start: float
+    end: float
+    text: str
+
 
 class PipelineResult(TypedDict):
     transcript: str
+    # The same segments without the "[M:SS - M:SS]" formatting: the analysis
+    # reads their text alone, since timestamps cost tokens and invite made-up
+    # ones.
+    segments: list[Segment]
+
+
+class Summary(TypedDict):
+    # No confidence numbers: a number the LLM writes is made up, not measured.
+    topic: str
+    summary: str
+    topics: list[str]
+    action_items: list[str]
+
+
+class TranscriptPrefill(NamedTuple):
+    """The transcript's shared KV cache, and what is needed to continue it.
+
+    `messages` are the chat turns `ids` encode: every task builds its prompt
+    as these turns plus its own, and checks the result still starts with `ids`.
+    """
+
+    cache: list[Any]
+    ids: list[int]
+    messages: list[dict[str, str]]
 
 
 # (upload file_id, record file_id, "upload" | "record" | None) carried across
@@ -749,6 +843,7 @@ def run_pipeline(
         segments = [{"start": 0.0, "end": duration}]
 
     lines: list[str] = []
+    texts: list[Segment] = []
     total_steps = max(len(segments), 1)
     for step, seg in enumerate(segments):
         if on_progress:
@@ -762,11 +857,256 @@ def run_pipeline(
         ts_start = format_timestamp(seg["start"])
         ts_end = format_timestamp(seg["end"])
         lines.append(f"[{ts_start} - {ts_end}] {text}")
+        texts.append({"start": seg["start"], "end": seg["end"], "text": text})
 
     # No closing (total, total) call: nothing runs after the last segment, and
     # main() empties the bar the moment this returns, so it would be coalesced
     # with that empty() in the same flush and, in practice, never painted.
-    return {"transcript": "\n".join(lines)}
+    return {"transcript": "\n".join(lines), "segments": texts}
+
+
+def segments_text(segments: list[Segment]) -> str:
+    """The transcript as the analysis reads it: segment texts, no timestamps."""
+    return " ".join(s["text"] for s in segments if s["text"]).strip()
+
+
+def _is_disk_full(e: BaseException) -> bool:
+    # hf_xet reports a full disk as a bare RuntimeError carrying the OS text
+    # (measured in Phase 0), not an OSError with ENOSPC, so both are checked.
+    if isinstance(e, OSError) and e.errno == errno.ENOSPC:
+        return True
+    text = str(e)
+    return "No space left on device" in text or "os error 28" in text
+
+
+@st.cache_resource(show_spinner=False)
+def load_llm(model_id: str, revision: str | None = None) -> tuple[Any, Any]:
+    """Load the analysis LLM and its tokenizer wrapper, once per process.
+
+    No strict= here because mlx_lm.load has none to pass: it calls
+    mlx_lm.utils.load_model with that function's default strict=True, which a
+    contract test pins. trust_remote_code stays at its False default — the app
+    never runs code from a model repo. The two failures a user can cause are
+    turned into one-line RuntimeErrors; anything else propagates.
+    """
+    try:
+        loaded = _load_llm(model_id, revision=revision)
+    except LocalEntryNotFoundError as e:
+        # Offline with nothing cached, or the Hub unreachable after retries.
+        raise RuntimeError(
+            "The language model isn't downloaded yet, and the Hugging Face Hub "
+            "can't be reached."
+        ) from e
+    except (OSError, RuntimeError) as e:
+        if _is_disk_full(e):
+            raise RuntimeError(
+                "Not enough disk space to download the language model "
+                f"(about 4 GB) to {HF_HUB_CACHE}."
+            ) from e
+        raise
+    return loaded[0], loaded[1]
+
+
+def check_analysis_length(transcript: str) -> None:
+    """Refuse a transcript that is clearly too long, before loading the model.
+
+    An estimate from the word count, since the exact count needs the tokenizer
+    that ships with the 3.9 GB model. The 1.2 margin leaves borderline cases to
+    prefill_transcript's exact check.
+    """
+    estimate = round(len(transcript.split()) * ANALYSIS_TOKENS_PER_WORD)
+    if estimate > 1.2 * MAX_ANALYSIS_TOKENS:
+        raise RuntimeError(
+            f"Transcript is too long to analyse (about {estimate} tokens; the "
+            f"limit is {MAX_ANALYSIS_TOKENS})."
+        )
+
+
+def _chat_ids(
+    tokenizer: Any, messages: list[dict[str, str]], generation_prompt: bool
+) -> list[int]:
+    # Through mlx_lm's TokenizerWrapper, which forces return_dict=False, so this
+    # is token ids. Thinking off: the answer then follows `<think></think>`.
+    return list(
+        tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=generation_prompt,
+            enable_thinking=False,
+        )
+    )
+
+
+def _transcript_messages(transcript: str) -> list[dict[str, str]]:
+    # The transcript is data, so it sits in its own user turn behind a
+    # delimiter, with every task in a later turn. A weak control on its own;
+    # rendering model output as plain text is the real one.
+    return [
+        {"role": "system", "content": ANALYSIS_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": ANALYSIS_TRANSCRIPT_PROMPT.format(transcript=transcript),
+        },
+    ]
+
+
+def prefill_transcript(
+    model: Any,
+    tokenizer: Any,
+    transcript: str,
+    on_progress: Callable[[int, int, str], None] | None = None,
+) -> TranscriptPrefill:
+    """Run the transcript prefix through the model once, for every task.
+
+    Prefill is the dominant cost (~500 tok/s on the 3B, compute-bound), so the
+    summary and the questions all continue from this one cache. on_progress
+    fires before each ANALYSIS_PREFILL_TOKENS chunk, `(i, n, "part i+1 of n")`,
+    mirroring run_pipeline's contract.
+    """
+    messages = _transcript_messages(transcript)
+    ids = _chat_ids(tokenizer, messages, generation_prompt=False)
+    if len(ids) > MAX_ANALYSIS_TOKENS:
+        # Refused, never truncated: a summary of the first two hours labelled
+        # as the whole recording is worse than none.
+        raise RuntimeError(
+            f"Transcript is too long to analyse ({len(ids)} tokens; the limit "
+            f"is {MAX_ANALYSIS_TOKENS})."
+        )
+    cache = make_prompt_cache(model)
+    starts = range(0, len(ids), ANALYSIS_PREFILL_TOKENS)
+    for i, start in enumerate(starts):
+        if on_progress:
+            on_progress(i, len(starts), f"part {i + 1} of {len(starts)}")
+        model(mx.array(ids[start : start + ANALYSIS_PREFILL_TOKENS])[None], cache=cache)
+        mx.eval([c.state for c in cache])
+    return TranscriptPrefill(cache, ids, messages)
+
+
+def _task_cache(
+    model: Any,
+    tokenizer: Any,
+    prefill: TranscriptPrefill,
+    turns: list[dict[str, str]],
+) -> tuple[list[Any], list[int], bool]:
+    """The cache and ids to run a task on: `(cache, ids, shared)`.
+
+    Normally the shared cache and the ids after the prefix. A chat template
+    can rewrite earlier turns once later ones exist, and then the cached
+    prefix describes tokens the full prompt no longer starts with; that case
+    runs the whole prompt on a fresh cache and warns, since a silent fallback
+    would cost a second prefill with nothing to say why. The warning carries
+    no transcript text (PLAN.md, Security, rule 4).
+    """
+    full = _chat_ids(tokenizer, [*prefill.messages, *turns], generation_prompt=True)
+    if full[: len(prefill.ids)] == prefill.ids:
+        return prefill.cache, full[len(prefill.ids) :], True
+    warnings.warn(
+        "The chat template rewrote the cached transcript prefix; running this "
+        "task from a full prompt.",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+    return make_prompt_cache(model), full, False
+
+
+def _generate(
+    model: Any,
+    tokenizer: Any,
+    cache: list[Any],
+    ids: list[int],
+    on_progress: Callable[[int, int, str], None] | None,
+) -> str:
+    """Greedy generation from `cache` to the end of the turn, as text.
+
+    generate_step has no end-of-sequence check (only stream_generate stops on
+    eos_token_ids), so the stop is here. Running out of tokens is its own
+    failure, not bad JSON, and is not retried: the same budget would run out
+    the same way.
+    """
+    eos = set(tokenizer.eos_token_ids)
+    generated: list[int] = []
+    for n, (token, _) in enumerate(
+        generate_step(
+            mx.array(ids),
+            model,
+            max_tokens=ANALYSIS_MAX_NEW_TOKENS,
+            sampler=make_sampler(temp=0.0),
+            prompt_cache=cache,
+        )
+    ):
+        if on_progress and n % ANALYSIS_PROGRESS_TOKENS == 0:
+            on_progress(n, ANALYSIS_MAX_NEW_TOKENS, "summary")
+        # Typed mx.array, but generate_step yields y.item(), a Python int.
+        token_id = int(token)
+        if token_id in eos:
+            return tokenizer.decode(generated)
+        generated.append(token_id)
+    raise RuntimeError(
+        "The summary was cut off before it finished; try a shorter recording."
+    )
+
+
+def parse_summary(text: str) -> Summary:
+    """The summary JSON, keys and types checked.
+
+    ValueError if there is no parseable object, TypeError if its shape is wrong.
+
+    Model output is data: json.loads only, never eval or YAML. Tolerates a
+    ```json fence or prose around the object by taking the outermost braces.
+    """
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end < start:
+        raise ValueError("no JSON object in the summary")
+    data = json.loads(text[start : end + 1])
+    if not isinstance(data, dict):
+        raise TypeError("the summary is not a JSON object")
+    for key in ("topic", "summary"):
+        if not isinstance(data.get(key), str):
+            raise TypeError(f"summary key {key!r} is not a string")
+    for key in ("topics", "action_items"):
+        value = data.get(key)
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise TypeError(f"summary key {key!r} is not a list of strings")
+    return {
+        "topic": data["topic"],
+        "summary": data["summary"],
+        "topics": data["topics"],
+        "action_items": data["action_items"],
+    }
+
+
+def summarize_transcript(
+    model: Any,
+    tokenizer: Any,
+    prefill: TranscriptPrefill,
+    on_progress: Callable[[int, int, str], None] | None = None,
+) -> Summary:
+    """A greedy JSON summary, continued from the shared transcript cache.
+
+    The cache is trimmed back to the transcript prefix afterwards, on success
+    or failure, so the questions start from the clean prefix. The trim reads
+    `offset` rather than counting tokens: generate_step computes one step
+    ahead of what it yields, so the cache holds one token more than the loop
+    consumed. One retry on unparseable output, with the bad reply shown back
+    to the model; a second failure is a RuntimeError.
+    """
+    turns = [{"role": "user", "content": SUMMARY_PROMPT}]
+    for attempt in range(2):
+        cache, ids, shared = _task_cache(model, tokenizer, prefill, turns)
+        try:
+            text = _generate(model, tokenizer, cache, ids, on_progress)
+        finally:
+            if shared:
+                trim_prompt_cache(cache, cache[0].offset - len(prefill.ids))
+        try:
+            return parse_summary(text)
+        except (ValueError, TypeError):
+            if attempt == 0:
+                turns = [
+                    *turns,
+                    {"role": "assistant", "content": text},
+                    {"role": "user", "content": SUMMARY_RETRY_PROMPT},
+                ]
+    raise RuntimeError("The summary could not be read; the model did not return JSON.")
 
 
 def _labeled_toggle(label: str, help: str, key: str, value: bool = True) -> bool:

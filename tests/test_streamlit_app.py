@@ -6,7 +6,7 @@ import wave
 from collections.abc import Iterator
 from itertools import pairwise
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, ClassVar, NamedTuple
 from unittest.mock import MagicMock, call, patch
 
 import av
@@ -20,6 +20,10 @@ from streamlit_app import (
     _MLX_VAD_BRANCH_ATTRS,
     _MLX_VAD_BRANCH_CONFIG_ATTRS,
     _MLX_VAD_CONFIG_ATTRS,
+    ANALYSIS_TRANSCRIPT_PROMPT,
+    LLM_ID,
+    LLM_REVISION,
+    MAX_ANALYSIS_TOKENS,
     MAX_SEGMENT_DURATION_S,
     MAX_VAD_OFF_DURATION_S,
     MIN_AUDIO_SAMPLES,
@@ -30,11 +34,14 @@ from streamlit_app import (
     MODEL_ID,
     MODEL_REVISION,
     SAMPLE_RATE,
+    SUMMARY_PROMPT,
+    SUMMARY_RETRY_PROMPT,
     SUPPORTED_FORMATS,
     VAD_CHUNK_SAMPLES,
     VAD_CONTEXT_SAMPLES,
     VIDEO_FORMATS,
     PipelineResult,
+    TranscriptPrefill,
     _decode_audio,
     _labeled_toggle,
     _mlx_vad_probabilities,
@@ -43,16 +50,22 @@ from streamlit_app import (
     _split_long_segment,
     _supports_mlx_vad,
     audio_duration_seconds,
+    check_analysis_length,
     format_timestamp,
     get_speech_segments,
     is_video,
     limit_mlx_cache,
     load_and_preprocess_audio,
+    load_llm,
     load_model,
     load_vad_model,
+    parse_summary,
+    prefill_transcript,
     run_pipeline,
+    segments_text,
     select_source,
     silero_vad,
+    summarize_transcript,
     transcribe_audio,
 )
 
@@ -67,6 +80,7 @@ AUDIO_DIR = Path(__file__).parent / "data" / "audio"
 _load_model = load_model.__wrapped__  # ty: ignore[unresolved-attribute]
 _load_vad_model = load_vad_model.__wrapped__  # ty: ignore[unresolved-attribute]
 _limit_mlx_cache = limit_mlx_cache.__wrapped__  # ty: ignore[unresolved-attribute]
+_load_llm = load_llm.__wrapped__  # ty: ignore[unresolved-attribute]
 
 
 def make_upload(
@@ -1079,7 +1093,23 @@ class TestRunPipeline:
         # A single PipelineResult: with the one-model, one-language pipeline
         # there is nothing to key by, so the exact key set is the TypedDict's.
         result = run_pipeline(torch.zeros(1, 160000), *pipeline_mocks)
-        assert set(result) == {"transcript"}
+        assert set(result) == {"transcript", "segments"}
+
+    def test_segments_carry_the_untimestamped_text(
+        self, pipeline_mocks: PipelineMocks
+    ) -> None:
+        # The analysis reads segment text without the "[M:SS - M:SS]" prefixes,
+        # which cost tokens and invite made-up timestamps.
+        pipeline_mocks.model.generate.side_effect = [
+            MagicMock(text="first"),
+            MagicMock(text="second"),
+        ]
+        with patch("streamlit_app.get_speech_segments", return_value=SEGMENTS_3S):
+            result = run_pipeline(torch.zeros(1, 48000), *pipeline_mocks)
+        assert result["segments"] == [
+            {"start": 0.0, "end": 1.5, "text": "first"},
+            {"start": 1.5, "end": 3.0, "text": "second"},
+        ]
 
     def test_single_segment_line_format(self, pipeline_mocks: PipelineMocks) -> None:
         result = run_pipeline(torch.zeros(1, 160000), *pipeline_mocks)
@@ -1294,6 +1324,493 @@ class TestGraniteSpeech5Contract:
 
 
 # ---------------------------------------------------------------------------
+# Transcript analysis
+# ---------------------------------------------------------------------------
+
+# FakeTokenizer's control tokens; every character token is its code point, so
+# all of these sit above anything ASCII text produces.
+_ROLE_IDS = {"system": 1001, "user": 1002, "assistant": 1003}
+_END_ID, _GEN_ID, _EOS_ID = 1004, 1005, 0
+
+
+class FakeTokenizer:
+    """Characters as token ids: decode is chr, and a prompt's prefix stays put.
+
+    The real template's only property the app relies on is that adding turns
+    leaves the earlier turns' ids unchanged; this one has it by construction.
+    """
+
+    eos_token_ids: ClassVar[set[int]] = {_EOS_ID}
+
+    def apply_chat_template(
+        self,
+        messages: list[dict[str, str]],
+        add_generation_prompt: bool,
+        enable_thinking: bool,
+    ) -> list[int]:
+        assert enable_thinking is False
+        ids: list[int] = []
+        for message in messages:
+            ids += [_ROLE_IDS[message["role"]], *map(ord, message["content"]), _END_ID]
+        return [*ids, _GEN_ID] if add_generation_prompt else ids
+
+    def decode(self, ids: list[int]) -> str:
+        return "".join(map(chr, ids))
+
+
+class RewritingTokenizer(FakeTokenizer):
+    """A template that rewrites the start once a task turn follows the prefix."""
+
+    def apply_chat_template(
+        self,
+        messages: list[dict[str, str]],
+        add_generation_prompt: bool,
+        enable_thinking: bool,
+    ) -> list[int]:
+        ids = super().apply_chat_template(
+            messages, add_generation_prompt, enable_thinking
+        )
+        return [_END_ID, *ids] if len(messages) > 2 else ids
+
+
+class FakeKVCache:
+    """Just the KVCache surface the app and trim_prompt_cache touch."""
+
+    def __init__(self) -> None:
+        self.offset = 0
+        self.state = mx.array(0)
+
+    def is_trimmable(self) -> bool:
+        return True
+
+    def trim(self, n: int) -> int:
+        n = min(self.offset, n)
+        self.offset -= n
+        return n
+
+
+def fake_llm(ids: mx.array, cache: list[FakeKVCache]) -> mx.array:
+    for c in cache:
+        c.offset += ids.shape[1]
+    return mx.zeros((1, ids.shape[1], 8))
+
+
+def tokens(text: str) -> list[int]:
+    return [ord(c) for c in text]
+
+
+VALID_JSON = '{"topic": "t", "summary": "s", "topics": ["a"], "action_items": []}'
+VALID_SUMMARY = {"topic": "t", "summary": "s", "topics": ["a"], "action_items": []}
+
+
+class ScriptedGenerate:
+    """Stands in for generate_step, replaying one scripted reply per call.
+
+    Like the real one it advances the cache by the prompt, then computes one
+    step ahead of each token it yields — the extra token the trim must remove
+    by reading `offset` rather than counting what the loop consumed.
+    """
+
+    def __init__(self, *replies: list[int]) -> None:
+        self.replies = list(replies)
+        self.prompts: list[list[int]] = []
+
+    def __call__(
+        self,
+        prompt: mx.array,
+        model: Any,
+        *,
+        max_tokens: int,
+        sampler: Any,
+        prompt_cache: list[FakeKVCache],
+    ) -> Iterator[tuple[int, None]]:
+        self.prompts.append([int(t) for t in prompt])
+        reply = self.replies[len(self.prompts) - 1]
+        for c in prompt_cache:
+            c.offset += prompt.size
+        for token in reply[:max_tokens]:
+            for c in prompt_cache:
+                c.offset += 1
+            yield token, None
+
+    def prompt_text(self, i: int) -> str:
+        return "".join(chr(t) for t in self.prompts[i] if t < 1000)
+
+
+@pytest.fixture
+def fake_prefill() -> Iterator[TranscriptPrefill]:
+    with patch(
+        "streamlit_app.make_prompt_cache",
+        side_effect=lambda model: [FakeKVCache(), FakeKVCache()],
+    ):
+        yield prefill_transcript(fake_llm, FakeTokenizer(), "hello world")
+
+
+def test_llm_id() -> None:
+    assert LLM_ID == "ibm-granite/granite-4.2-3b-q8-mlx"
+
+
+def test_llm_revision_is_pinned() -> None:
+    # MODEL_REVISION's reason, plus one: the repo's chat template is code that
+    # runs, and only an immutable hash vouches for it.
+    assert LLM_REVISION == "8e19ac6574124635eb8fbd06a15d05ebbfff82dd"
+    assert re.fullmatch(r"[0-9a-f]{40}", LLM_REVISION)
+
+
+def test_segments_text_joins_the_texts_and_skips_empty_ones() -> None:
+    segments = [
+        {"start": 0.0, "end": 1.0, "text": "one"},
+        {"start": 1.0, "end": 2.0, "text": ""},
+        {"start": 2.0, "end": 3.0, "text": "two"},
+    ]
+    assert segments_text(segments) == "one two"  # ty: ignore[invalid-argument-type]
+
+
+@patch("streamlit_app.st", new=MagicMock(spec=[]))
+class TestLoadLlm:
+    @patch("streamlit_app._load_llm")
+    def test_loads_the_pinned_revision_and_nothing_else(
+        self, mock_load: MagicMock
+    ) -> None:
+        mock_load.return_value = ("model", "tokenizer")
+        assert _load_llm(LLM_ID, LLM_REVISION) == ("model", "tokenizer")
+        # Exactly these arguments: in particular no trust_remote_code, which
+        # must stay at mlx_lm's False default (PLAN.md, Security, rule 2).
+        mock_load.assert_called_once_with(LLM_ID, revision=LLM_REVISION)
+
+    @patch("streamlit_app._load_llm")
+    def test_offline_first_use_is_a_one_line_error(self, mock_load: MagicMock) -> None:
+        from huggingface_hub.errors import LocalEntryNotFoundError
+
+        mock_load.side_effect = LocalEntryNotFoundError("no cache, no network")
+        with pytest.raises(RuntimeError, match="isn't downloaded yet"):
+            _load_llm(LLM_ID, LLM_REVISION)
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            # What hf_xet raised on a full disk in Phase 0: a bare RuntimeError.
+            RuntimeError(
+                "Task error: File reconstruction error: IO Error: No space left "
+                "on device (os error 28)"
+            ),
+            OSError(28, "No space left on device"),
+        ],
+    )
+    @patch("streamlit_app._load_llm")
+    def test_full_disk_is_a_one_line_error(
+        self, mock_load: MagicMock, error: Exception
+    ) -> None:
+        mock_load.side_effect = error
+        with pytest.raises(RuntimeError, match=r"Not enough disk space .*about 4 GB"):
+            _load_llm(LLM_ID, LLM_REVISION)
+
+    @patch("streamlit_app._load_llm")
+    def test_other_failures_propagate_unchanged(self, mock_load: MagicMock) -> None:
+        mock_load.side_effect = RuntimeError("something else")
+        with pytest.raises(RuntimeError, match="^something else$"):
+            _load_llm(LLM_ID, LLM_REVISION)
+
+
+class TestCheckAnalysisLength:
+    def test_refuses_a_clearly_too_long_transcript(self) -> None:
+        with pytest.raises(RuntimeError, match=r"too long to analyse \(about \d+"):
+            check_analysis_length("word " * MAX_ANALYSIS_TOKENS * 2)
+
+    def test_leaves_borderline_lengths_to_the_exact_check(self) -> None:
+        check_analysis_length("word " * MAX_ANALYSIS_TOKENS)
+
+
+class TestPrefillTranscript:
+    def test_prefills_the_prefix_once_in_chunks_reporting_before_each(
+        self,
+    ) -> None:
+        caches = [FakeKVCache(), FakeKVCache()]
+        model = MagicMock(side_effect=fake_llm)
+        progress = MagicMock()
+        tokenizer = FakeTokenizer()
+        with (
+            patch("streamlit_app.make_prompt_cache", return_value=caches),
+            patch("streamlit_app.ANALYSIS_PREFILL_TOKENS", 100),
+        ):
+            prefill = prefill_transcript(model, tokenizer, "a" * 150, progress)
+        expected = tokenizer.apply_chat_template(
+            prefill.messages, add_generation_prompt=False, enable_thinking=False
+        )
+        assert prefill.ids == expected
+        assert prefill.cache is caches
+        assert caches[0].offset == len(expected)
+        n = -(-len(expected) // 100)
+        assert [c.args[0].shape[1] for c in model.call_args_list] == [
+            min(100, len(expected) - i * 100) for i in range(n)
+        ]
+        assert progress.call_args_list == [
+            call(i, n, f"part {i + 1} of {n}") for i in range(n)
+        ]
+
+    def test_the_transcript_sits_in_its_own_delimited_user_turn(self) -> None:
+        with patch("streamlit_app.make_prompt_cache", return_value=[FakeKVCache()]):
+            prefill = prefill_transcript(fake_llm, FakeTokenizer(), "hello world")
+        assert prefill.messages[-1] == {
+            "role": "user",
+            "content": ANALYSIS_TRANSCRIPT_PROMPT.format(transcript="hello world"),
+        }
+        assert [m["role"] for m in prefill.messages] == ["system", "user"]
+
+    def test_refuses_over_the_limit_with_the_count_and_runs_nothing(self) -> None:
+        model = MagicMock(side_effect=fake_llm)
+        with (
+            patch("streamlit_app.MAX_ANALYSIS_TOKENS", 50),
+            pytest.raises(RuntimeError, match=r"too long to analyse \(\d+ tokens"),
+        ):
+            prefill_transcript(model, FakeTokenizer(), "a" * 100)
+        model.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (VALID_JSON, VALID_SUMMARY),
+        (f"```json\n{VALID_JSON}\n```", VALID_SUMMARY),
+        (f"Here is the summary:\n{VALID_JSON}\nHope that helps.", VALID_SUMMARY),
+    ],
+)
+def test_parse_summary_accepts(text: str, expected: dict) -> None:
+    assert parse_summary(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "error"),
+    [
+        ("no object here", ValueError),
+        ("{not json}", ValueError),
+        ('{"topic": "t", "summary": "s", "topics": []}', TypeError),
+        ('{"topic": 1, "summary": "s", "topics": [], "action_items": []}', TypeError),
+        (
+            '{"topic": "t", "summary": "s", "topics": "a", "action_items": []}',
+            TypeError,
+        ),
+        (
+            '{"topic": "t", "summary": "s", "topics": [1], "action_items": []}',
+            TypeError,
+        ),
+    ],
+)
+def test_parse_summary_rejects(text: str, error: type[Exception]) -> None:
+    with pytest.raises(error):
+        parse_summary(text)
+
+
+class TestSummarizeTranscript:
+    def test_stops_at_end_of_turn_and_trims_back_to_the_prefix(
+        self, fake_prefill: TranscriptPrefill
+    ) -> None:
+        # Junk after the EOS must never reach the parser.
+        generate = ScriptedGenerate([*tokens(VALID_JSON), _EOS_ID, *tokens("junk")])
+        with patch("streamlit_app.generate_step", generate):
+            summary = summarize_transcript(fake_llm, FakeTokenizer(), fake_prefill)
+        assert summary == VALID_SUMMARY
+        assert SUMMARY_PROMPT in generate.prompt_text(0)
+        # One step ahead of the consumed tokens, and trimmed off by offset.
+        assert [c.offset for c in fake_prefill.cache] == [len(fake_prefill.ids)] * 2
+
+    def test_running_out_of_tokens_raises_without_a_retry(
+        self, fake_prefill: TranscriptPrefill
+    ) -> None:
+        generate = ScriptedGenerate(tokens(VALID_JSON[:-1]) * 10)
+        with (
+            patch("streamlit_app.generate_step", generate),
+            patch("streamlit_app.ANALYSIS_MAX_NEW_TOKENS", 20),
+            pytest.raises(RuntimeError, match="cut off"),
+        ):
+            summarize_transcript(fake_llm, FakeTokenizer(), fake_prefill)
+        assert len(generate.prompts) == 1
+        assert fake_prefill.cache[0].offset == len(fake_prefill.ids)
+
+    def test_bad_json_is_retried_once_with_the_reply_shown_back(
+        self, fake_prefill: TranscriptPrefill
+    ) -> None:
+        generate = ScriptedGenerate(
+            [*tokens("not json"), _EOS_ID], [*tokens(VALID_JSON), _EOS_ID]
+        )
+        with patch("streamlit_app.generate_step", generate):
+            summary = summarize_transcript(fake_llm, FakeTokenizer(), fake_prefill)
+        assert summary == VALID_SUMMARY
+        retry = generate.prompt_text(1)
+        assert "not json" in retry
+        assert SUMMARY_RETRY_PROMPT in retry
+        assert fake_prefill.cache[0].offset == len(fake_prefill.ids)
+
+    def test_a_second_bad_reply_is_a_runtime_error(
+        self, fake_prefill: TranscriptPrefill
+    ) -> None:
+        generate = ScriptedGenerate(
+            [*tokens("nope"), _EOS_ID], [*tokens("still nope"), _EOS_ID]
+        )
+        with (
+            patch("streamlit_app.generate_step", generate),
+            pytest.raises(RuntimeError, match="could not be read"),
+        ):
+            summarize_transcript(fake_llm, FakeTokenizer(), fake_prefill)
+        assert len(generate.prompts) == 2
+
+    def test_reports_progress_every_32_tokens(
+        self, fake_prefill: TranscriptPrefill
+    ) -> None:
+        reply = tokens(VALID_JSON.replace('"s"', '"' + "x" * 40 + '"'))
+        generate = ScriptedGenerate([*reply, _EOS_ID])
+        progress = MagicMock()
+        with patch("streamlit_app.generate_step", generate):
+            summarize_transcript(fake_llm, FakeTokenizer(), fake_prefill, progress)
+        assert [c.args[0] for c in progress.call_args_list] == list(
+            range(0, len(reply) + 1, 32)
+        )
+        assert {c.args[2] for c in progress.call_args_list} == {"summary"}
+
+    def test_a_rewritten_prefix_falls_back_to_a_full_prompt_and_warns(
+        self,
+    ) -> None:
+        tokenizer = RewritingTokenizer()
+        transcript = "the secret launch date"
+        with patch(
+            "streamlit_app.make_prompt_cache",
+            side_effect=lambda model: [FakeKVCache()],
+        ) as make_cache:
+            prefill = prefill_transcript(fake_llm, tokenizer, transcript)
+            generate = ScriptedGenerate([*tokens(VALID_JSON), _EOS_ID])
+            with (
+                patch("streamlit_app.generate_step", generate),
+                pytest.warns(RuntimeWarning, match="rewrote the cached") as record,
+            ):
+                summary = summarize_transcript(fake_llm, tokenizer, prefill)
+        assert summary == VALID_SUMMARY
+        # The whole prompt went to a fresh cache; the shared one is untouched.
+        assert generate.prompts[0][0] == _END_ID
+        assert make_cache.call_count == 2
+        assert prefill.cache[0].offset == len(prefill.ids)
+        # No transcript text in warnings (PLAN.md, Security, rule 4).
+        assert all(transcript not in str(w.message) for w in record)
+
+
+def _tiny_granite() -> Any:
+    from mlx_lm.models.granite import Model, ModelArgs
+
+    mx.random.seed(0)
+    return Model(
+        ModelArgs(
+            model_type="granite",
+            hidden_size=32,
+            num_hidden_layers=2,
+            intermediate_size=64,
+            num_attention_heads=4,
+            rms_norm_eps=1e-5,
+            vocab_size=1100,  # above FakeTokenizer's control ids
+            logits_scaling=1.0,
+            attention_multiplier=0.25,
+            embedding_multiplier=1.0,
+            residual_multiplier=1.0,
+            max_position_embeddings=4096,
+            num_key_value_heads=2,
+            attention_bias=False,
+            mlp_bias=False,
+            rope_theta=10000.0,
+        )
+    )
+
+
+def _last_logits(model: Any, ids: list[int], cache: list[Any]) -> mx.array:
+    return model(mx.array(ids)[None], cache=cache)[0, -1]
+
+
+class TestGraniteLlmContract:
+    """The real installed mlx_lm surface the analysis relies on, no download.
+
+    Everywhere else the LLM, its cache and generate_step are fakes, so this is
+    the only CI coverage of the cache logic against the real classes.
+    """
+
+    def test_load_takes_a_revision_and_runs_no_remote_code_by_default(self) -> None:
+        from mlx_lm import load
+
+        params = inspect.signature(load).parameters
+        assert "revision" in params
+        assert params["trust_remote_code"].default is False
+
+    def test_load_model_is_strict_by_default(self) -> None:
+        # load() exposes no strict=, so this default is the only thing between a
+        # renamed key and randomly initialised layers.
+        from mlx_lm.utils import load_model
+
+        assert inspect.signature(load_model).parameters["strict"].default is True
+
+    def test_granite_and_the_cache_helpers_exist(self) -> None:
+        import mlx_lm.models.granite  # noqa: F401
+        from mlx_lm.models import cache
+
+        for name in ("make_prompt_cache", "trim_prompt_cache", "can_trim_prompt_cache"):
+            assert callable(getattr(cache, name))
+
+    def test_cached_prefix_plus_suffix_matches_the_full_prompt(self) -> None:
+        from mlx_lm.models.cache import make_prompt_cache
+
+        model, tokenizer = _tiny_granite(), FakeTokenizer()
+        prefill = prefill_transcript(model, tokenizer, "a short transcript")
+        turns = [*prefill.messages, {"role": "user", "content": "question?"}]
+        full = tokenizer.apply_chat_template(
+            turns, add_generation_prompt=True, enable_thinking=False
+        )
+        cached = _last_logits(model, full[len(prefill.ids) :], prefill.cache)
+        fresh = _last_logits(model, full, make_prompt_cache(model))
+        assert mx.allclose(cached, fresh, atol=1e-4)
+
+    def test_the_summary_leaves_the_cache_exactly_at_the_prefix(self) -> None:
+        # Real generate_step, which runs one step ahead: with every id an EOS
+        # it stops at once, both attempts fail to parse, and the trim must still
+        # land on the prefix — dropping it, or counting tokens by hand, leaves a
+        # cache whose question logits differ from a fresh prefill's.
+        model, tokenizer = _tiny_granite(), FakeTokenizer()
+        prefill = prefill_transcript(model, tokenizer, "a short transcript")
+        with (
+            patch.object(FakeTokenizer, "eos_token_ids", set(range(1100))),
+            pytest.raises(RuntimeError, match="could not be read"),
+        ):
+            summarize_transcript(model, tokenizer, prefill)
+        assert prefill.cache[0].offset == len(prefill.ids)
+        question = [_ROLE_IDS["user"], *tokens("question?"), _END_ID, _GEN_ID]
+        reused = _last_logits(model, question, prefill.cache)
+        again = prefill_transcript(model, tokenizer, "a short transcript")
+        assert mx.allclose(
+            reused, _last_logits(model, question, again.cache), atol=1e-4
+        )
+
+    def test_summarises_with_real_weights(self) -> None:
+        """Structure only, on the pinned snapshot, and only where it is cached.
+
+        Gated like the TurboCTC smoke test, so CI never fetches 3.89 GB.
+        """
+        from huggingface_hub import try_to_load_from_cache
+
+        if not isinstance(
+            try_to_load_from_cache(LLM_ID, "model.safetensors", revision=LLM_REVISION),
+            str,
+        ):
+            pytest.skip(f"{LLM_ID} not in the local HF cache; not downloading 3.9 GB")
+        try:
+            model, tokenizer = _load_llm(LLM_ID, LLM_REVISION)
+        except Exception as e:  # noqa: BLE001 - any failure means skip
+            pytest.skip(f"{LLM_ID} unavailable: {e}")
+        transcript = (
+            "okay let us start the budget is twenty thousand euros and the launch is "
+            "on friday at three priya will send the slides to the client tomorrow"
+        )
+        prefill = prefill_transcript(model, tokenizer, transcript)
+        summary = summarize_transcript(model, tokenizer, prefill)
+        assert set(summary) == {"topic", "summary", "topics", "action_items"}
+        assert summary["summary"]
+        assert prefill.cache[0].offset == len(prefill.ids)
+
+
+# ---------------------------------------------------------------------------
 # Result card rendering
 # ---------------------------------------------------------------------------
 
@@ -1301,19 +1818,19 @@ class TestGraniteSpeech5Contract:
 @patch("streamlit_app.st")
 class TestRenderResultCard:
     def test_renders_text(self, mock_st: MagicMock) -> None:
-        result: PipelineResult = {"transcript": "hello"}
+        result: PipelineResult = {"transcript": "hello", "segments": []}
         _render_result_card(result, "test")
         mock_st.text.assert_called_once_with("hello")
 
     def test_card_title_is_transcription(self, mock_st: MagicMock) -> None:
-        result: PipelineResult = {"transcript": "hello"}
+        result: PipelineResult = {"transcript": "hello", "segments": []}
         _render_result_card(result, "test")
         mock_st.subheader.assert_called_once_with("Transcription")
 
     def test_renders_no_status_banner(self, mock_st: MagicMock) -> None:
         # The card is subheader + text + download button and nothing else; a
         # guard against a success/warning banner coming back.
-        result: PipelineResult = {"transcript": "hello"}
+        result: PipelineResult = {"transcript": "hello", "segments": []}
         _render_result_card(result, "test")
         mock_st.success.assert_not_called()
         mock_st.warning.assert_not_called()
@@ -1321,7 +1838,7 @@ class TestRenderResultCard:
     def test_download_button_offers_the_transcript_as_text(
         self, mock_st: MagicMock
     ) -> None:
-        result: PipelineResult = {"transcript": "hello world"}
+        result: PipelineResult = {"transcript": "hello world", "segments": []}
         _render_result_card(result, "audio")
         args, kwargs = mock_st.download_button.call_args
         # A real label, not "": download_button has no label_visibility, so
@@ -1340,7 +1857,7 @@ class TestRenderResultCard:
     def test_renders_bordered_container_without_a_stretch_height(
         self, mock_st: MagicMock
     ) -> None:
-        result: PipelineResult = {"transcript": "hello"}
+        result: PipelineResult = {"transcript": "hello", "segments": []}
         _render_result_card(result, "test")
         # The bordered card, then the header row inside it that floats the
         # download button to the right edge with a stretch space.
@@ -1356,7 +1873,7 @@ class TestRenderResultCard:
     def test_download_button_is_in_the_header_row(self, mock_st: MagicMock) -> None:
         # Header row, not under the text: on a long transcript a button below
         # the text is a few hundred lines below the fold.
-        result: PipelineResult = {"transcript": "hello"}
+        result: PipelineResult = {"transcript": "hello", "segments": []}
         _render_result_card(result, "test")
         # The full call sequence, not a filtered one: a button emitted after
         # the row closes, or a space emitted after the button, would pass an
