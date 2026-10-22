@@ -24,6 +24,7 @@ from streamlit_app import (
     MAX_VAD_OFF_DURATION_S,
     MIN_AUDIO_SAMPLES,
     MIN_SEGMENT_DURATION_S,
+    MLX_CACHE_LIMIT_BYTES,
     MLX_VAD_REPO,
     MLX_VAD_REVISION,
     MODEL_ID,
@@ -45,6 +46,7 @@ from streamlit_app import (
     format_timestamp,
     get_speech_segments,
     is_video,
+    limit_mlx_cache,
     load_and_preprocess_audio,
     load_model,
     load_vad_model,
@@ -64,6 +66,7 @@ AUDIO_DIR = Path(__file__).parent / "data" / "audio"
 # through Streamlit machinery.
 _load_model = load_model.__wrapped__  # ty: ignore[unresolved-attribute]
 _load_vad_model = load_vad_model.__wrapped__  # ty: ignore[unresolved-attribute]
+_limit_mlx_cache = limit_mlx_cache.__wrapped__  # ty: ignore[unresolved-attribute]
 
 
 def make_upload(
@@ -945,6 +948,21 @@ class TestAudioDurationSeconds:
 # because of spec=[]: every attribute access, subscript and iteration raises,
 # so nothing can accumulate on it. Don't "fix" this into new_callable — that
 # injects the mock back into every signature as a parameter nobody uses.
+@patch("streamlit_app.st", new=MagicMock(spec=[]))
+class TestLimitMlxCache:
+    def test_limit_is_one_gib(self) -> None:
+        # Measured on a 30-minute VAD run through the app: 8.47 GB of process
+        # footprint without a limit, 2.49 GB at 1 GiB, same transcript and
+        # transcription time. Track B's 10 GB budget for the 8B LLM is met only
+        # under it, so raising it is a re-measurement, not a tweak.
+        assert MLX_CACHE_LIMIT_BYTES == 1 << 30
+
+    @patch("streamlit_app.mx.set_cache_limit")
+    def test_sets_the_limit(self, mock_set: MagicMock) -> None:
+        _limit_mlx_cache()
+        mock_set.assert_called_once_with(MLX_CACHE_LIMIT_BYTES)
+
+
 @patch("streamlit_app.st", new=MagicMock(spec=[]))
 class TestLoadModel:
     @patch("streamlit_app._load_stt_model")

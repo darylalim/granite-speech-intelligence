@@ -47,6 +47,7 @@ from streamlit.testing.v1.element_tree import Block as TreeBlock
 from streamlit_app import (
     ACCEPTED_FORMATS_CAPTION,
     LAYOUT_MAX_WIDTH_PX,
+    MLX_CACHE_LIMIT_BYTES,
     MODEL_ID,
     MODEL_REVISION,
     TRANSCRIPT_MAX_WIDTH_PX,
@@ -649,6 +650,23 @@ def test_run_with_vad_on_renders_a_timestamped_transcript(
     # No status banner of any kind: the card is transcript and download only.
     assert len(at.success) == 0
     assert len(at.warning) == 0
+
+
+def test_run_caps_the_mlx_cache_before_loading_the_model(
+    audio_bytes: bytes, speech_loader: MagicMock
+) -> None:
+    """The cache limit is set before the speech model load, MLX's first
+    allocation in a run, and once per process rather than once per run."""
+    calls = MagicMock()
+    calls.attach_mock(speech_loader, "load_model")
+    with patch("mlx.core.set_cache_limit") as set_limit:
+        calls.attach_mock(set_limit, "set_cache_limit")
+        at = _upload_and_run(audio_bytes, use_segmentation=False)
+        _assert_single_result_card(at)
+        at.button(key="transcribe").click().run()
+        assert not at.exception
+    assert [c[0] for c in calls.mock_calls[:2]] == ["set_cache_limit", "load_model"]
+    set_limit.assert_called_once_with(MLX_CACHE_LIMIT_BYTES)
 
 
 def test_run_with_vad_off_transcribes_the_whole_clip(

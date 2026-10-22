@@ -98,6 +98,14 @@ VAD_CONTEXT_SAMPLES = 64
 # audio) holds ~17 MB in flight. Measured +43 MB peak over the streaming path
 # on 15 min of audio, and larger batches stopped helping once the GPU saturated.
 VAD_ENCODER_BATCH_CHUNKS = 2048
+# Ceiling on MLX's cache of freed GPU buffers, which is unbounded by default.
+# Peak *active* memory is small (0.88 GB of weights plus one segment), but
+# every segment's freed buffers stay cached: after a 30-minute VAD run MLX
+# held 0.88 GB active and 6.39 GB cached. Measured through the app (Streamlit
+# server phys_footprint, 32 minutes of speech): 8.47 GB without a limit,
+# 2.49 GB at 1 GiB (lifetime peak 8.66 -> 3.27 GB), with the transcript
+# byte-identical and click-to-card time unchanged (12.9s both).
+MLX_CACHE_LIMIT_BYTES = 1 << 30
 # Ceiling for the VAD-off path, where the whole clip is one inference. Memory
 # is the only bound: attention is block-local (128 frames per block, relative
 # positions only within a block), so there is no context length to run out
@@ -504,6 +512,17 @@ def get_speech_segments(
         for seg in segments
         for part in _split_long_segment(seg["start"], seg["end"], max_segment_duration)
     ]
+
+
+@st.cache_resource(show_spinner=False)
+def limit_mlx_cache() -> None:
+    """Cap MLX's buffer cache, once per process.
+
+    The limit is process-global, so one call is enough; @st.cache_resource is
+    what keeps it to one rather than one per rerun. main() calls it before the
+    first model load, i.e. before MLX allocates anything.
+    """
+    mx.set_cache_limit(MLX_CACHE_LIMIT_BYTES)
 
 
 @st.cache_resource(show_spinner=False)
@@ -956,6 +975,7 @@ def main() -> None:
                 # never paints; it carries the kwarg so the three read alike.
                 with st.spinner("Decoding audio...", show_time=True):
                     wav = load_and_preprocess_audio(audio_file)
+                limit_mlx_cache()
                 with st.spinner("Loading speech model...", show_time=True):
                     model = load_model(MODEL_ID, MODEL_REVISION)
 
