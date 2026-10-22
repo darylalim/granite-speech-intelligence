@@ -1,0 +1,643 @@
+{
+ "corpus": "AMI Meeting Corpus, manual annotations v1.6.2 and Mix-Headset audio (CC BY 4.0, AMI Consortium / University of Edinburgh)",
+ "drafted": "2026-10-21",
+ "questions": {
+  "asking": "Is the speaker asking a question?",
+  "decision": "Is the speaker making a decision?",
+  "angry": "Is the speaker angry or frustrated?",
+  "company": "Does the speaker name a company, product or brand?",
+  "money": "Does the speaker mention money or a price?",
+  "person": "Does the speaker mention a person by name?",
+  "datetime": "Does the speaker mention a date, a time or a deadline?",
+  "place": "Does the speaker mention a place?",
+  "commit": "Does the speaker commit to doing something?"
+ },
+ "method": [
+  "Excerpts are 180 s windows from the 16 AMI-SDM evaluation meetings (EN2002, ES2004, IS1009, TS3003, a-d), five per meeting series.",
+  "The split is by meeting, never by excerpt: meetings a and c are the tuning half, b and d the held-out half, so each series appears in both halves and no meeting in both.",
+  "Windows in the annotated series (ES, IS, TS) were chosen greedily from 30 s steps to balance yes and no per question within each half; the EN2002 windows (no dialogue-act, entity or summary layers) were fixed at 600 s, 900 s and 1500 s.",
+  "'derived' is the label read from the annotations alone: asking = an Elicit-* dialogue act; decision / commit = an abstractive decisions / actions sentence linked to a dialogue act in the window (commit also on an Offer act); angry = a Be-Negative act; company = ORGANIZATION; money = MONEY; person = PERSON:OTHER or EXPERIMENTER; datetime = TIME or DATE; place = LOCATION.",
+  "'labels' is the final label, checked by reading each excerpt's transcript; every disagreement with 'derived', and every borderline call, has a note. 'The speaker' is read as anyone in the excerpt, since the meetings have four. Mentions of cost or expense count as money; named software products count as products.",
+  "Drafted by Claude (an LLM) on the user's request and not yet reviewed by a person."
+ ],
+ "excerpts": [
+  {
+   "id": "ES2004a_510",
+   "meeting": "ES2004a",
+   "start": 510,
+   "end": 690,
+   "split": "tune",
+   "labels": {
+    "asking": true,
+    "decision": false,
+    "angry": false,
+    "company": false,
+    "money": true,
+    "person": false,
+    "datetime": false,
+    "place": true,
+    "commit": true
+   },
+   "derived": {
+    "asking": true,
+    "decision": false,
+    "angry": false,
+    "company": false,
+    "money": true,
+    "person": false,
+    "datetime": false,
+    "place": true,
+    "commit": true
+   },
+   "notes": {
+    "datetime": "'in our first year' is a period for the profit aim, not a date, time or deadline",
+    "commit": "'I'll be able to pull it up or I could put it in the shared folder'"
+   }
+  },
+  {
+   "id": "ES2004c_690",
+   "meeting": "ES2004c",
+   "start": 690,
+   "end": 870,
+   "split": "tune",
+   "labels": {
+    "asking": true,
+    "decision": false,
+    "angry": false,
+    "company": false,
+    "money": true,
+    "person": false,
+    "datetime": false,
+    "place": false,
+    "commit": false
+   },
+   "derived": {
+    "asking": true,
+    "decision": false,
+    "angry": false,
+    "company": false,
+    "money": true,
+    "person": false,
+    "datetime": false,
+    "place": false,
+    "commit": false
+   },
+   "notes": {
+    "money": "'what kind of price are we looking at', 'twelve point f'"
+   }
+  },
+  {
+   "id": "ES2004c_1650",
+   "meeting": "ES2004c",
+   "start": 1650,
+   "end": 1830,
+   "split": "tune",
+   "labels": {
+    "asking": true,
+    "decision": true,
+    "angry": false,
+    "company": false,
+    "money": true,
+    "person": false,
+    "datetime": false,
+    "place": false,
+    "commit": false
+   },
+   "derived": {
+    "asking": true,
+    "decision": true,
+    "angry": false,
+    "company": false,
+    "money": false,
+    "person": false,
+    "datetime": false,
+    "place": false,
+    "commit": false
+   },
+   "notes": {
+    "decision": "'Do we agree on the battery' / 'Kinetic' / 'Yeah'",
+    "money": "'check the financial feasibility ... at a low cost'; cost talk counts as money throughout",
+    "commit": "borderline no: 'we can check into the financial feasibility' is a proposal, not an undertaking"
+   }
+  },
+  {
+   "id": "IS1009a_360",
+   "meeting": "IS1009a",
+   "start": 360,
+   "end": 540,
+   "split": "tune",
+   "labels": {
+    "asking": true,
+    "decision": false,
+    "angry": false,
+    "company": false,
+    "money": true,
+    "person": false,
+    "datetime": false,
+    "place": false,
+    "commit": false
+   },
+   "derived": {
+    "asking": true,
+    "decision": true,
+    "angry": false,
+    "company": false,
+    "money": true,
+    "person": false,
+    "datetime": false,
+    "place": false,
+    "commit": false
+   },
+   "notes": {
+    "decision": "annotation yes from summary links to the budget (given by management, not decided) and a brainstorm; no choice is settled in the excerpt"
+   }
+  },
+  {
+   "id": "IS1009c_1590",
+   "meeting": "IS1009c",
+   "start": 1590,
+   "end": 1770,
+   "split": "tune",
+   "labels": {
+    "asking": true,
+    "decision": true,
+    "angry": false,
+    "company": false,
+    "money": true,
+    "person": true,
+    "datetime": true,
+    "place": false,
+    "commit": true
+   },
+   "derived": {
+    "asking": true,
+    "decision": true,
+    "angry": false,
+    "company": false,
+    "money": false,
+    "person": true,
+    "datetime": true,
+    "place": false,
+    "commit": true
+   },
+   "notes": {
+    "money": "'costly', 'most cost-effective', 'how expensive'",
+    "person": "'Jana', 'Francine'",
+    "datetime": "'around eight o'clock', 'next meeting will be in thirty minutes'"
+   }
+  },
+  {
+   "id": "TS3003a_960",
+   "meeting": "TS3003a",
+   "start": 960,
+   "end": 1140,
+   "split": "tune",
+   "labels": {
+    "asking": true,
+    "decision": false,
+    "angry": false,
+    "company": false,
+    "money": true,
+    "person": false,
+    "datetime": false,
+    "place": false,
+    "commit": true
+   },
+   "derived": {
+    "asking": true,
+    "decision": true,
+    "angry": false,
+    "company": false,
+    "money": true,
+    "person": true,
+    "datetime": false,
+    "place": false,
+    "commit": true
+   },
+   "notes": {
+    "decision": "annotation yes from the selling price, which is presented, not decided",
+    "person": "annotation yes from 'Garfield', a cartoon cat, not a person",
+    "company": "'Garfield' is a character, not counted as a brand",
+    "commit": "'I'll just try something else' (drawing)"
+   }
+  },
+  {
+   "id": "TS3003c_210",
+   "meeting": "TS3003c",
+   "start": 210,
+   "end": 390,
+   "split": "tune",
+   "labels": {
+    "asking": false,
+    "decision": false,
+    "angry": false,
+    "company": false,
+    "money": false,
+    "person": false,
+    "datetime": false,
+    "place": true,
+    "commit": false
+   },
+   "derived": {
+    "asking": false,
+    "decision": false,
+    "angry": false,
+    "company": false,
+    "money": false,
+    "person": false,
+    "datetime": false,
+    "place": true,
+    "commit": true
+   },
+   "notes": {
+    "commit": "annotation yes from an Offer act ('this leads us to some personal preferences'); only past actions are described",
+    "place": "'Milan and Paris'"
+   }
+  },
+  {
+   "id": "TS3003c_780",
+   "meeting": "TS3003c",
+   "start": 780,
+   "end": 960,
+   "split": "tune",
+   "labels": {
+    "asking": false,
+    "decision": false,
+    "angry": false,
+    "company": false,
+    "money": true,
+    "person": false,
+    "datetime": false,
+    "place": false,
+    "commit": false
+   },
+   "derived": {
+    "asking": false,
+    "decision": false,
+    "angry": false,
+    "company": false,
+    "money": false,
+    "person": false,
+    "datetime": false,
+    "place": false,
+    "commit": false
+   },
+   "notes": {
+    "money": "'it raises the price'"
+   }
+  },
+  {
+   "id": "EN2002a_600",
+   "meeting": "EN2002a",
+   "start": 600,
+   "end": 780,
+   "split": "tune",
+   "labels": {
+    "asking": true,
+    "decision": true,
+    "angry": false,
+    "company": true,
+    "money": false,
+    "person": false,
+    "datetime": false,
+    "place": false,
+    "commit": true
+   },
+   "notes": {
+    "decision": "'they're definitely gonna be in the same window'; weak",
+    "company": "'Mozilla', 'Photoshop', 'Java', 'Windows', 'Linux'",
+    "commit": "'I can have a look'"
+   }
+  },
+  {
+   "id": "EN2002c_900",
+   "meeting": "EN2002c",
+   "start": 900,
+   "end": 1080,
+   "split": "tune",
+   "labels": {
+    "asking": true,
+    "decision": false,
+    "angry": false,
+    "company": false,
+    "money": false,
+    "person": false,
+    "datetime": false,
+    "place": false,
+    "commit": true
+   },
+   "notes": {
+    "decision": "borderline no: 'they should have two options' / 'that kinda makes sense' is not settled",
+    "angry": "'That's insane' is surprise",
+    "commit": "'I could probably ... put a check in there'"
+   }
+  },
+  {
+   "id": "ES2004b_1620",
+   "meeting": "ES2004b",
+   "start": 1620,
+   "end": 1800,
+   "split": "held",
+   "labels": {
+    "asking": true,
+    "decision": false,
+    "angry": false,
+    "company": true,
+    "money": true,
+    "person": false,
+    "datetime": true,
+    "place": false,
+    "commit": false
+   },
+   "derived": {
+    "asking": false,
+    "decision": true,
+    "angry": false,
+    "company": true,
+    "money": false,
+    "person": false,
+    "datetime": true,
+    "place": false,
+    "commit": true
+   },
+   "notes": {
+    "asking": "annotation no (no Elicit act), but 'Is it worthwhile ...', 'would that not make it more attractive'",
+    "decision": "annotation yes from a summary link to Video Plus; it is praised, not decided, in the excerpt",
+    "company": "'Sky', 'Carphone Warehouse'",
+    "money": "'free service', 'how much the cost would be'",
+    "datetime": "'Tuesdays at ten o'clock on the seventeenth'",
+    "commit": "annotation yes from an Offer act, 'Can I just run this past you', which asks for the floor"
+   }
+  },
+  {
+   "id": "ES2004d_1620",
+   "meeting": "ES2004d",
+   "start": 1620,
+   "end": 1800,
+   "split": "held",
+   "labels": {
+    "asking": true,
+    "decision": false,
+    "angry": false,
+    "company": true,
+    "money": true,
+    "person": true,
+    "datetime": false,
+    "place": false,
+    "commit": false
+   },
+   "derived": {
+    "asking": true,
+    "decision": false,
+    "angry": true,
+    "company": false,
+    "money": true,
+    "person": false,
+    "datetime": false,
+    "place": false,
+    "commit": false
+   },
+   "notes": {
+    "company": "'Play-Doh'",
+    "person": "'Sarah'",
+    "money": "'twelve point five', 'under the budget'",
+    "angry": "annotation yes from a Be-Negative act ('I'm still not caught up'); the excerpt is a warm team review"
+   }
+  },
+  {
+   "id": "IS1009b_1290",
+   "meeting": "IS1009b",
+   "start": 1290,
+   "end": 1470,
+   "split": "held",
+   "labels": {
+    "asking": false,
+    "decision": false,
+    "angry": false,
+    "company": false,
+    "money": true,
+    "person": true,
+    "datetime": true,
+    "place": false,
+    "commit": false
+   },
+   "derived": {
+    "asking": false,
+    "decision": false,
+    "angry": false,
+    "company": false,
+    "money": false,
+    "person": true,
+    "datetime": true,
+    "place": false,
+    "commit": false
+   },
+   "notes": {
+    "money": "'I don't think it will cost much'",
+    "person": "'John Reece'",
+    "datetime": "'around eight P_M_'"
+   }
+  },
+  {
+   "id": "IS1009d_870",
+   "meeting": "IS1009d",
+   "start": 870,
+   "end": 1050,
+   "split": "held",
+   "labels": {
+    "asking": true,
+    "decision": true,
+    "angry": true,
+    "company": false,
+    "money": true,
+    "person": false,
+    "datetime": false,
+    "place": false,
+    "commit": false
+   },
+   "derived": {
+    "asking": true,
+    "decision": true,
+    "angry": false,
+    "company": false,
+    "money": true,
+    "person": false,
+    "datetime": false,
+    "place": false,
+    "commit": false
+   },
+   "notes": {
+    "decision": "components chosen one by one: battery, double curved, plastic, rubber",
+    "angry": "mild frustration at the spreadsheet: 'It doesn't work', 'Oh go away', 'Come on'"
+   }
+  },
+  {
+   "id": "IS1009d_1110",
+   "meeting": "IS1009d",
+   "start": 1110,
+   "end": 1290,
+   "split": "held",
+   "labels": {
+    "asking": true,
+    "decision": false,
+    "angry": false,
+    "company": false,
+    "money": false,
+    "person": false,
+    "datetime": false,
+    "place": false,
+    "commit": true
+   },
+   "derived": {
+    "asking": true,
+    "decision": false,
+    "angry": false,
+    "company": false,
+    "money": false,
+    "person": false,
+    "datetime": false,
+    "place": false,
+    "commit": true
+   },
+   "notes": {
+    "commit": "'I'll take my file down so you can bring it up'"
+   }
+  },
+  {
+   "id": "TS3003b_990",
+   "meeting": "TS3003b",
+   "start": 990,
+   "end": 1170,
+   "split": "held",
+   "labels": {
+    "asking": false,
+    "decision": true,
+    "angry": false,
+    "company": false,
+    "money": true,
+    "person": false,
+    "datetime": false,
+    "place": false,
+    "commit": false
+   },
+   "derived": {
+    "asking": false,
+    "decision": true,
+    "angry": false,
+    "company": false,
+    "money": false,
+    "person": false,
+    "datetime": false,
+    "place": false,
+    "commit": true
+   },
+   "notes": {
+    "decision": "the manager announces requirements: TV only, no teletext, customers over forty",
+    "money": "'the price is going to go sky-high'",
+    "commit": "annotation yes from Offer acts ('I'm here to ... tell you some new requirements'), which describe the role"
+   }
+  },
+  {
+   "id": "TS3003d_540",
+   "meeting": "TS3003d",
+   "start": 540,
+   "end": 720,
+   "split": "held",
+   "labels": {
+    "asking": true,
+    "decision": false,
+    "angry": true,
+    "company": false,
+    "money": true,
+    "person": false,
+    "datetime": false,
+    "place": false,
+    "commit": false
+   },
+   "derived": {
+    "asking": true,
+    "decision": false,
+    "angry": true,
+    "company": false,
+    "money": false,
+    "person": false,
+    "datetime": false,
+    "place": false,
+    "commit": false
+   },
+   "notes": {
+    "angry": "'Damn', 'it seems ... impossible to get the twelve and a half Euros'",
+    "money": "no MONEY entity is annotated, but 'Eighteen Euros', 'saves us one Euro', 'twelve and a half Euros'"
+   }
+  },
+  {
+   "id": "EN2002b_600",
+   "meeting": "EN2002b",
+   "start": 600,
+   "end": 780,
+   "split": "held",
+   "labels": {
+    "asking": true,
+    "decision": false,
+    "angry": false,
+    "company": true,
+    "money": false,
+    "person": false,
+    "datetime": true,
+    "place": false,
+    "commit": true
+   },
+   "notes": {
+    "decision": "borderline no: 'I'll claim one you'll claim the other' is proposed, not agreed",
+    "company": "'Java'",
+    "datetime": "'before tomorrow', 'tomorrow morning'",
+    "commit": "'I'll be wiring that in hopefully tomorrow morning', 'I'll take a look at that'"
+   }
+  },
+  {
+   "id": "EN2002d_600",
+   "meeting": "EN2002d",
+   "start": 600,
+   "end": 780,
+   "split": "held",
+   "labels": {
+    "asking": true,
+    "decision": true,
+    "angry": false,
+    "company": false,
+    "money": false,
+    "person": false,
+    "datetime": false,
+    "place": false,
+    "commit": true
+   },
+   "notes": {
+    "decision": "'just do top five both local and global' / 'Yep'; weak",
+    "commit": "'I'll just finish' (cut off at the excerpt end)"
+   }
+  },
+  {
+   "id": "EN2002d_1500",
+   "meeting": "EN2002d",
+   "start": 1500,
+   "end": 1680,
+   "split": "held",
+   "labels": {
+    "asking": true,
+    "decision": false,
+    "angry": true,
+    "company": false,
+    "money": false,
+    "person": false,
+    "datetime": true,
+    "place": false,
+    "commit": true
+   },
+   "notes": {
+    "angry": "'Shit ... not done at all' on learning a deadline",
+    "datetime": "'the eighteenth', 'Thursday twenty fourth deadline'",
+    "commit": "'do you wanna write him an email then' / 'Sure'"
+   }
+  }
+ ]
+}

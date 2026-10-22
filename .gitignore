@@ -19,3 +19,7 @@ dist/
 *.gguf
 *.npz
 mlx_model/
+
+# Evaluation corpus data and results stay local (PLAN.md, Evaluation)
+evals/data/
+evals/results/
