@@ -1,6 +1,6 @@
-# Plan: transcript analysis with Granite 4.2 8B
+# Plan: transcript analysis with Granite 4.2 3B
 
-Status: **draft; Track B started** (A1–A3 committed on 2026-10-17 as 4001f01, 7ead012 and 7c93564, A4 and A5 on 2026-10-20 as 2d6ac40 and f890915, A6 the same day as 704d9d5, B1 the same day as 553d0f7, B2's measurements the same day, A7, which B2 added to Track A, on 2026-10-21 as 72e36d9, and B3 the same day as a review branch, its labels awaiting a person's review; B4 is next. See Order of work). Written 2026-10-17 for a later implementation session. Delete this file (or move it under `docs/`) once the work lands; CLAUDE.md is where the lasting record goes.
+Status: **draft; Track B started** (A1–A3 committed on 2026-10-17 as 4001f01, 7ead012 and 7c93564, A4 and A5 on 2026-10-20 as 2d6ac40 and f890915, A6 the same day as 704d9d5, B1 the same day as 553d0f7, B2's measurements the same day, A7, which B2 added to Track A, on 2026-10-21 as 72e36d9, B3 the same day, its labels awaiting a person's review, and B4 the same day: the **3B** is the model; B5 is next. See Order of work). Written 2026-10-17 for a later implementation session. Delete this file (or move it under `docs/`) once the work lands; CLAUDE.md is where the lasting record goes.
 
 ## Order of work
 
@@ -27,11 +27,11 @@ A4 and A6 can be one session; A5 should be its own, because a dependency break h
 | B1 | `chore(deps): add mlx-lm for transcript analysis` | **Done (553d0f7).** 0.32.2 landed, the release the API notes were written against, so they stand. The lock gained `mlx-lm` alone: its seven requirements were already there via `mlx-audio`, so there was nothing new to review. Originally: `mlx-lm` is in the lock, its new dependencies are reviewed (Security, rule 5), and the four checks pass. |
 | B2 | Phase 0 spike, in the scratchpad (steps 2–10; step 1's `uv add` is B1, and step 4's evaluation run is B3) | **Done (2026-10-20, CLAUDE.md "Transcript analysis (planned): Phase 0 measurements").** Full analysis of 30 min is 41.5 s against the 30 s budget, and prefill alone is ~30 s at ~200 tok/s, compute-bound; memory meets the budget only under `mx.set_cache_limit(1 GiB)` (8.53 GB; 11.87 GB without); per question 0.34–0.39 s; per-segment 226 s; disk-full raises a bare `RuntimeError` from `hf_xet`, not `OSError`. Measured on battery; the prefill series re-run on AC agreed within ±3%. Originally: every other Phase 0 figure and every Performance budget has a measured value, written into CLAUDE.md. |
 | B3 | `test(pipeline): add transcript analysis evaluation` (Evaluation; Phase 0 step 4's second half) | **Done (2026-10-21, CLAUDE.md "Transcript analysis (planned): evaluation"), labels pending review.** The 180 labels are drafted by Claude from the AMI annotations and await a person's review; `--rescore` re-scores a saved run after edits, without the model. The `anyone` prompt was chosen on the tuning half. Held-out pooled / within-excerpt ROC-AUC: **8B** 0.84 / 0.86 on human transcripts and 0.79 / 0.81 on ASR; **3B** 0.78 / 0.79 and 0.76 / 0.77. Decision ranks below chance for both, and P(yes) leans towards No. Full analysis of 30 minutes: 3B 22.6 s, inside the 30 s budget; 8B 44.8 s. The summary's action-item recall and rubric are still by hand. Originally: the labels and split are committed, and held-out scores exist on both human and ASR transcripts for the 8B, and for the 3B if the 8B missed a budget in B2. |
-| B4 | **Decision point** (end of Phase 0) | 8B vs 3B, `MAX_ANALYSIS_TOKENS`, Phase 3 yes/no, the cache-keeping and lock decisions (Performance, items 3 and 6), and the PyAV resample question are each written into this file with the measured reason. The download decision (Phase 1) is made here too. |
-| B5 | `feat(pipeline): summarise transcripts with granite 4.2 8b` (Phase 1 code and data) | The shared-prefix prefill, the summary and the `segments` key exist; the unit and contract tests listed for them pass. |
+| B4 | **Decision point** (end of Phase 0) | **Done (2026-10-21; see "Decisions (B4)" after Phase 0).** 3B; `MAX_ANALYSIS_TOKENS = 24_576`; no Phase 3; no kept cache; the lock ships; no resample before Phase 1; the analysis download ships. The 8B's cache entry is deleted. Originally: 8B vs 3B, `MAX_ANALYSIS_TOKENS`, Phase 3 yes/no, the cache-keeping and lock decisions (Performance, items 3 and 6), and the PyAV resample question are each written into this file with the measured reason. The download decision (Phase 1) is made here too. |
+| B5 | `feat(pipeline): summarise transcripts with granite 4.2 3b` (Phase 1 code and data) | The shared-prefix prefill, the summary and the `segments` key exist; the unit and contract tests listed for them pass. |
 | B6 | `feat(pipeline): answer yes/no questions from cached transcript prefill` (Phase 2 code) | The cache-equivalence tests (after a question, and after a summary) pass, and the held-out evaluation scores are re-run against the shipped prompt. |
 | B7 | `feat(ui): add transcript analysis card and questions` (Phase 1 and 2 UI) | All AppTests in Tests, Security, Performance and Accessibility pass; the frame measurements are re-run with analysis on; the VoiceOver walk-through (Accessibility) is done. |
-| B8 | Phase 3, only if B4 said so | Its own entries are added to this list first. |
+| B8 | Phase 3, only if B4 said so | **Skipped: B4 said no** (1.66 s per segment, ~113 s for 32 minutes, and unmeasured). |
 | B9 | `docs: document transcript analysis` | Everything under "Docs and housekeeping" is done, and this file is deleted or moved under `docs/`. |
 
 The commit subjects here replace the ordering in "Docs and housekeeping"; that list stays as the full set of subjects.
@@ -52,13 +52,14 @@ Everything runs on-device; nothing leaves the machine. The design borrows from t
 
 | | |
 |---|---|
-| Repo | `ibm-granite/granite-4.2-8b-q4-mlx`, IBM's own MLX conversion, Apache 2.0 |
-| Revision | `9047f073e46c527f70dade07bb55b1700d728e36` (the only revision as of 2026-09-02; pin it, for the same reproducibility reason as `MODEL_REVISION`) |
-| Weights | 4.95 GB, one `model.safetensors`, 4-bit affine, group size 64 |
-| Architecture | `model_type: granite`, `GraniteForCausalLM`. Dense decoder: 40 layers, 32 attention heads, 8 KV heads (GQA), hidden 4096, vocab 100,352, 131,072-token context. `mlx_lm.models.granite` exists in mlx-lm 0.32.2 |
+| Repo | `ibm-granite/granite-4.2-3b-q8-mlx`, IBM's own MLX conversion, Apache 2.0 (chosen at B4; see Decisions below) |
+| Revision | `8e19ac6574124635eb8fbd06a15d05ebbfff82dd` (the only revision as of 2026-09-02; pin it, for the same reproducibility reason as `MODEL_REVISION`) |
+| Weights | 3.89 GB, one `model.safetensors`, 8-bit affine, group size 64 |
+| Architecture | `model_type: granite`, `GraniteForCausalLM`. Dense decoder: 40 layers, 40 attention heads, 8 KV heads (GQA), hidden 2560 (head dim 64), vocab 100,352, 131,072-token context. KV cache 80 KB per token. Same tokenizer and chat template as the 8B: Yes 9642, No 2822, EOS 100257. `mlx_lm.models.granite` exists in mlx-lm 0.32.2 |
+| Evaluated and rejected | `ibm-granite/granite-4.2-8b-q4-mlx` at `9047f073e46c527f70dade07bb55b1700d728e36`: 4.95 GB, 4-bit, hidden 4096, 32 heads, KV 160 KB per token. The planning session's first choice, and the model Phase 0 measured |
 | Chat format | ChatML (`<\|im_start\|>role\n...<\|im_end\|>`). This is **not** Granite Switch's `<\|start_of_role\|>` format, so don't copy the Space's string markers |
 
-Why this one, for a 16 GB M2 Pro (decided in the planning session):
+Why these candidates, for a 16 GB M2 Pro (decided in the planning session; B4 then chose the 3B on measurement):
 
 - `8b-q8` (9.34 GB) and `30b-q4` (16.47 GB) don't fit next to the app. The app's existing load is about 3–4 GB of OS, browser and Streamlit, about 1.5 GB of TurboCTC at a 30 s segment's peak, and decoded audio. Also, macOS lets the GPU use well under all 16 GB.
 - `3b-q8` (3.89 GB) is the **fallback** if Phase 0 shows 8B is too slow or too tight. The constant makes it a one-line swap.
@@ -151,6 +152,18 @@ Do this in a scratch script under the session scratchpad, not in the repo. Weigh
 
 Write the measured numbers into CLAUDE.md in the same style as the TurboCTC memory series.
 
+### Decisions (B4, 2026-10-21)
+
+Measured on the M2 Pro, 16 GB, with the speech model resident and the 1 GiB MLX cache limit, warm. The source is the real 32-minute app transcript from the A7 run (6,591 prefix tokens), tiled for longer lengths. Full figures are in CLAUDE.md, "Transcript analysis (planned): evaluation" and "Phase 0 measurements".
+
+- **The 3B, not the 8B** (user's call, on the B3 numbers). Held-out pooled / within-excerpt ROC-AUC on ASR transcripts, which is what the app feeds the model: 3B 0.76 / 0.77 against the 8B's 0.79 / 0.81. On human transcripts: 0.78 / 0.79 against 0.84 / 0.86. Full analysis of 30 minutes: 3B 22.6 s, inside the 30 s budget, against the 8B's 44.8 s; MLX peak 5.13 against 6.65 GB. The trade-off, written down as the plan asks: the 3B ranks answers worse, by 3–4 points on ASR input (about one excerpt's worth of swing at 90 labels, so within noise) and 6–7 on human transcripts (closer to a real gap). It is twice as fast and the only candidate inside every budget. `kv_bits=8` and a lower `MAX_ANALYSIS_TOKENS` could not rescue the 8B, because its miss is prefill compute (~205 tok/s), not memory. The 8B's cache entry has been deleted (`du` on the hub: 9.1 → 4.5 GB). `uv run python -m evals.run_analysis_eval --model 8b` re-fetches it if a comparison is ever wanted.
+- **`MAX_ANALYSIS_TOKENS = 24_576`, about two hours of meeting speech** (206 prefix tokens per minute on the A7 transcript). Whole-process lifetime peak footprint is 7.71 GB at 6.6K tokens (32 min), 8.13 GB at 13.1K, 9.31 GB at 26.2K and 10.18 GB at 39.2K. The cap is set by memory, the hard constraint (past ~10 GB a 16 GB Mac swaps), with ~0.8 GB to spare: interpolated, ≈ 9.2 GB at 24.6K. Time is the soft constraint, since the bar moves and a rerun can stop it: prefill slows with context (500 → 433 → 338 → 275 tok/s), and the full analysis takes 22.5 s at 32 min, 42.0 s at 64 min and 91.6 s at 128 min. At the cap that is about 85 s. 32,768 would have fit the 10 GB budget too, by ~0.2 GB, which is too thin. The length pre-check's estimate uses 1.072 tokens per word.
+- **Phase 3 does not ship in v1; B8 is skipped.** Per segment (a fresh cache, then 9 questions) costs 1.66 s, so a 32-minute meeting's 68 segments take ~113 s, five times the whole-transcript analysis, on top of it. Nothing in the evaluation measures per-segment answers, so that cost would buy an unmeasured feature. Revisit only with per-segment labels.
+- **Don't keep the KV cache between reruns** (Performance, item 3). A board-only re-run then costs one prefill, 13.2 s at 30 minutes, which meets that budget by definition. Keeping the cache would hold 0.5 GB per session at 30 minutes and 2 GB at the cap, per tab, and 2 GB on top of the cap's ~9.2 GB peak breaks the budget.
+- **Ship the inference lock** (Performance, item 6). B2's two-thread run raised no error and gave bit-identical results, but each analysis took twice as long and held its own KV cache. Two concurrent analyses at the cap would add ~2 GB past ~9.2 GB. A lock costs nothing measurable for one user and removes both the memory risk and the untested concurrent-MLX path.
+- **No PyAV resample before Phase 1.** Torch's share (step 7) is 140 MB, under 2% of the analysis peak, and the source-rate decode it would avoid is local to `load_and_preprocess_audio`, freed before the LLM loads, so it never adds to the analysis peak. It stays an Out-of-scope follow-up, worth doing on its own merits.
+- **Ship the `<stem>_analysis.md` download in v1** (Phase 1, Download). Analysis results live only in session state, so without it a summary leaves the app only by copy and paste. Its cost is one `download_button` (`key="dl_md"`, `on_click="ignore"`) in the Analysis card's header and a formatter with a unit test. That is a product call, made here on cost alone. Dropping it touches nothing else.
+
 ## Phase 1: summary card
 
 ### Code (`streamlit_app.py`)
@@ -181,7 +194,7 @@ Write the measured numbers into CLAUDE.md in the same style as the TurboCTC memo
   - **One retry** on a parse or validation failure, appending the bad output plus a "return only valid JSON" turn. mlx-lm has no schema-constrained decoding as far as the planning session found; check `logits_processors` before building one.
   - If the retry also fails, raise `RuntimeError` with a readable one-liner, following the project's `RuntimeError` rule.
 - **Before analysing, skip a blank transcript.** If the joined segment text is empty or whitespace (VAD found no speech, and the full-clip fallback transcribed nothing), don't load or run the LLM. Show `st.caption("No speech to analyse.")` in the analysis slot. Otherwise the model would summarise nothing and invent content.
-- **Pre-check the length before loading the model.** Counting tokens needs the tokenizer, which comes with the 5 GB model, so a 3-hour recording would download and load the model only to be refused. First estimate from the word count (Phase 0 measures tokens per word on the tiled transcript; about 1.3 is typical for English BPE). Refuse at once if the estimate is clearly over the limit (above 1.2 × `MAX_ANALYSIS_TOKENS`). Otherwise load the model and do the exact check below.
+- **Pre-check the length before loading the model.** Counting tokens needs the tokenizer, which comes with the 3.9 GB model, so a 3-hour recording would download and load the model only to be refused. First estimate from the word count (Phase 0 measured 1.072 tokens per word on app transcripts, against the ~1.3 typical of English BPE; the 3B shares the 8B's tokenizer). Refuse at once if the estimate is clearly over the limit (above 1.2 × `MAX_ANALYSIS_TOKENS`). Otherwise load the model and do the exact check below.
 - **Limit check:** count the prompt's tokens first. Over `MAX_ANALYSIS_TOKENS`, raise `RuntimeError(f"Transcript is too long to analyse ({n} tokens; the limit is {MAX_ANALYSIS_TOKENS}).")`. Don't truncate silently: a summary of the first hour labelled as the whole thing is worse than none. Chunked map-reduce summaries are out of scope for v1.
 
 ### Data
@@ -194,20 +207,20 @@ Write the measured numbers into CLAUDE.md in the same style as the TurboCTC memo
 
 ### UI
 
-- **Sidebar:** a second `_labeled_toggle("Transcript analysis", help=..., key="use_analysis", value=False)`. It's **off by default**, so the default app and its memory are unchanged. Three existing tests do change, on purpose (see the next bullet). Help text: "Summarises the transcript and answers yes/no questions with a local Granite 4.2 8B model (~5 GB download on first use)."
+- **Sidebar:** a second `_labeled_toggle("Transcript analysis", help=..., key="use_analysis", value=False)`. It's **off by default**, so the default app and its memory are unchanged. Three existing tests do change, on purpose (see the next bullet). Help text: "Summarises the transcript and answers yes/no questions with a local Granite 4.2 3B model (~4 GB download on first use)."
   - The sidebar model line gains a second `:small[]` line for `LLM_ID`, shown only when analysis is on. Keep `:small[]` rather than `st.caption`; see CLAUDE.md's contrast note.
   - **Existing tests to update deliberately**, not loosen:
     - `test_sidebar_holds_settings_and_app_info_only` counts markdown elements.
     - `tests/test_app_ui.py:221–222` assert that the toggle keys are exactly `{"use_segmentation"}` and that every toggle is on. Change them to `{"use_segmentation", "use_analysis"}`, with `use_segmentation` on and `use_analysis` off.
     - `tests/test_app_ui.py:255` asserts the same key set for the sidebar.
-  - **Tell the user about the download before it happens.** When the toggle is on and the model isn't in the local cache (one `huggingface_hub.try_to_load_from_cache(LLM_ID, "model.safetensors", revision=LLM_REVISION)` check, which makes no network call with a full hash), show a caption in the input column: "The first analysis downloads the language model (about 5 GB)." The tooltip alone hides the size from anyone who doesn't hover.
+  - **Tell the user about the download before it happens.** When the toggle is on and the model isn't in the local cache (one `huggingface_hub.try_to_load_from_cache(LLM_ID, "model.safetensors", revision=LLM_REVISION)` check, which makes no network call with a full hash), show a caption in the input column: "The first analysis downloads the language model (about 4 GB)." The tooltip alone hides the size from anyone who doesn't hover.
 - **Run order inside the existing `try`:**
   1. Decode.
   2. Speech model, then VAD.
   3. `run_pipeline`.
   4. **Store `result`/`result_stem` first.**
   5. **Draw the transcript card immediately** (see Performance), and above it an `st.skeleton` in the analysis slot, sized to the Analysis card's typical height so the transcript doesn't jump when the real card replaces it.
-  6. Then, if analysis is on: spinner "Loading language model..." (`show_time=True`; a cold 4.95 GB fetch takes minutes), then the progress bar through "Reading transcript (part i of n)..." (prefill chunks), "Summarising...", and "Answering question i of n...".
+  6. Then, if analysis is on: spinner "Loading language model..." (`show_time=True`; a cold 3.89 GB fetch took 110 s in B3), then the progress bar through "Reading transcript (part i of n)..." (prefill chunks), "Summarising...", and "Answering question i of n...".
 
   Because the transcript is committed and shown before analysis starts, **an analysis failure must not lose the transcript.**
   - **Fire the "Transcription complete" toast before analysis starts**, not at the end of the run, so it can't be skipped by an analysis failure.
@@ -230,8 +243,8 @@ Write the measured numbers into CLAUDE.md in the same style as the TurboCTC memo
     - `board` is keyed by `_board_key = (_last_input_key, questions_tuple)`.
   - Toggling analysis on, or editing questions, **after** a transcript exists must not re-transcribe. Show a secondary "Analyse" button (`type="secondary"`) in the analysis slot. It computes only what's missing: the summary if absent, and the board if the questions changed. A run that only needs the board still prefills the transcript, unless the cache is kept (Performance, item 3).
   - Pop `summary` and `board` whenever `_last_input_key` changes, in the same loop that pops `result`/`result_stem`. Pop `board` alone when the questions change.
-- **Download (a decision, not an afterthought):** `<stem>_transcription.txt` stays unchanged. Analysis results live only in session state (see Storage), so without a second button a summary can't leave the app except by copy and paste. **Decide at the B4 decision point** whether v1 ships a `<stem>_analysis.md` download (topic, summary, topics, action items, and the question board as a Markdown table), and record the choice here. The cost is one `download_button` in the Analysis card's header, laid out like the transcript card's, plus a formatter function with a unit test. If it ships, give it its own key (`dl_md`) and `on_click="ignore"`, for the same reasons as `dl_txt`.
-- **Disk-full download:** if `load_llm` fails because the disk is full (the exception Phase 0 step 8 identifies), raise a one-line `RuntimeError` naming the model's size and the cache location ("Not enough disk space to download the language model (about 5 GB) to ~/.cache/huggingface/hub."). Don't leave a raw traceback. Show it in the analysis slot like any other analysis failure, so the transcript survives. A check before downloading (`shutil.disk_usage` against the size still to fetch) is optional. Catching the error is the part that's needed, because the disk can fill during the download.
+- **Download (a decision, not an afterthought):** `<stem>_transcription.txt` stays unchanged. Analysis results live only in session state (see Storage), so without a second button a summary can't leave the app except by copy and paste. **B4 decided that it ships** (see Decisions after Phase 0). Originally: decide at the B4 decision point whether v1 ships a `<stem>_analysis.md` download (topic, summary, topics, action items, and the question board as a Markdown table), and record the choice here. The cost is one `download_button` in the Analysis card's header, laid out like the transcript card's, plus a formatter function with a unit test. If it ships, give it its own key (`dl_md`) and `on_click="ignore"`, for the same reasons as `dl_txt`.
+- **Disk-full download:** if `load_llm` fails because the disk is full (the exception Phase 0 step 8 identifies), raise a one-line `RuntimeError` naming the model's size and the cache location ("Not enough disk space to download the language model (about 4 GB) to ~/.cache/huggingface/hub."). Don't leave a raw traceback. Show it in the analysis slot like any other analysis failure, so the transcript survives. A check before downloading (`shutil.disk_usage` against the size still to fetch) is optional. Catching the error is the part that's needed, because the disk can fill during the download.
 
 ## Phase 2: yes/no question board (whole transcript)
 
@@ -286,6 +299,8 @@ Write the measured numbers into CLAUDE.md in the same style as the TurboCTC memo
 
 ## Phase 3 (optional, gated on Phase 0 timing): per-segment answers
 
+**Not in v1: B4 measured 1.66 s per segment on the 3B (~113 s for a 32-minute meeting) and skipped it.** Kept below for a later revisit.
+
 - For each VAD segment, compute that segment's text into a fresh cache, then ask the questions as in Phase 2.
 - Result: a segment × question matrix of P(yes).
 - UI: for a chosen question (a `st.selectbox` in the card), list the segments whose P(yes) is highest, as `[M:SS - M:SS] 0.91 text…`, linked to the timestamps the transcript already shows.
@@ -314,7 +329,7 @@ Record the measured figures next to the budgets in CLAUDE.md, in the same style 
 
 1. **One prefill for everything** (Phase 1, prompt layout). The summary and the questions share one opening: a system turn plus the transcript turn. The transcript is processed once, the summary is generated from that cache and trimmed back, and the questions continue from the same cache. For a long transcript the prefill is the dominant cost, so this roughly halves analysis time compared with separate summary and question prefills. That figure is an estimate; Phase 0 step 9 measures it.
 2. **Show the transcript first** (Phase 1, run order). The transcript card is drawn as soon as transcription finishes, with an `st.skeleton` holding the Analysis card's space above it. The total time is unchanged, but the wait for the *transcript* is no longer extended by the analysis. Holding the space with a skeleton keeps the layout rule that the transcript doesn't jump.
-3. **Optionally keep the cache between reruns.** Keeping the transcript's KV cache in session state (with `_last_input_key`) would let edited questions skip the prefill entirely. It costs about 160 KB per token (about 1.3 GB at 8K) for as long as the session lasts, which is a lot on 16 GB. **Default: don't keep it.** Turn it on only if Phase 0 step 9 shows the memory fits within budget alongside everything else. If it ships, pop it with `summary`/`board` and never keep more than one.
+3. **Optionally keep the cache between reruns.** Keeping the transcript's KV cache in session state (with `_last_input_key`) would let edited questions skip the prefill entirely. It costs about 160 KB per token on the 8B, 80 KB on the 3B (about 0.5 GB for a 30-minute transcript, 2 GB at `MAX_ANALYSIS_TOKENS`) for as long as the session lasts, which is a lot on 16 GB. **Default: don't keep it** — and B4 decided not to (see Decisions after Phase 0). If it ships, pop it with `summary`/`board` and never keep more than one.
 4. **Split cache keys** (Phase 1, Invalidation). `summary` is keyed by the input and `board` by the input plus the questions, so editing a question never regenerates the summary.
 5. **Free MLX's buffer cache between stages** (Phase 0 step 9). MLX keeps freed GPU memory in its own cache for reuse, so after transcription that memory is unavailable to the LLM until it's released. `mx.clear_cache()` before the LLM loads is the first thing to try. Evicting the speech model (Risks) is the more expensive option, since it costs a reload on the next Transcribe.
 6. **One inference at a time.** Each browser tab runs in its own thread, and every tab shares the one cached model. Two analyses at once would double the KV memory, and running one MLX model from two threads at once is untested. Guard inference with a process-wide `threading.Lock` created in an `@st.cache_resource` function. Cover TurboCTC's `run_pipeline` call with the same lock, since it has the same exposure today.
@@ -426,7 +441,7 @@ The theme already sets colour contrast (every text pair ≥ 4.5:1, measured; see
 
 The app keeps nothing on disk except model weights, and this plan keeps it that way.
 
-- **Model weights** go in the Hugging Face cache (`~/.cache/huggingface/hub`, or `HF_HOME` if set). The LLM adds 4.95 GB (8B q4) or 3.89 GB (3B q8) to the existing TurboCTC (~0.9 GB) and MLX VAD (1.2 MB). The app never deletes anything from the cache.
+- **Model weights** go in the Hugging Face cache (`~/.cache/huggingface/hub`, or `HF_HOME` if set). The LLM adds 3.89 GB (the 3B q8 chosen at B4; its snapshot measures 3.6 GiB with `du -L`) to the existing TurboCTC (~0.9 GB) and MLX VAD (1.2 MB). The app never deletes anything from the cache.
 - **Old revisions pile up.** A pinned revision guards reproducibility but never cleans up: when a pin moves, the old snapshot stays. On 2026-10-17 the cache held an unpinned TurboCTC snapshot (`947f59a…`) next to the pinned `2864561…`, and a weightless `granite-4.2-8b-q8-mlx` entry (7 MB: tokenizer and config, with 79-byte placeholder files where the safetensors weights should be) left over from the planning session. **Rule:** whenever you change `MODEL_REVISION`, `MLX_VAD_REVISION` or `LLM_REVISION`, delete the old revision from the cache in the same session, after the new one has loaded and its tests pass. Add the rule to CLAUDE.md beside the revision notes. Notes on `hf cache rm` (huggingface_hub 1.32.0; A5 moves it to 2.2.0, so re-check the subcommands and output after Step 0):
   - It takes a repo (`model/<org>/<name>`) or a bare revision hash. Always run it with `--dry-run` first.
   - The dry run's size total is **not** the space freed. It reported 9.3 GB for those two entries: 947 MB for `947f59a`, which shares every weights file with the pinned revision, and the q8 model's full listed size even though no weights were downloaded. Only files no remaining revision uses are actually deleted, and those two entries free about 7 MB.
@@ -540,7 +555,7 @@ Follow the existing conventions (CLAUDE.md, Tests section):
 
 `test_analyses_a_transcript_with_real_weights`:
 
-- Gated on `huggingface_hub.try_to_load_from_cache(LLM_ID, "model.safetensors", revision=LLM_REVISION)`, exactly as the TurboCTC smoke test is gated, so CI never fetches 4.95 GB.
+- Gated on `huggingface_hub.try_to_load_from_cache(LLM_ID, "model.safetensors", revision=LLM_REVISION)`, exactly as the TurboCTC smoke test is gated, so CI never fetches 3.89 GB.
 - Assert only structure: valid keys, a non-empty summary, probabilities in [0, 1]. Plus one strong semantic signal, e.g. a transcript that clearly says "the meeting is on friday at three" gets P(yes) > 0.5 on the date/time question.
 - Don't pin exact wording, for the same reason the TurboCTC test doesn't.
 
@@ -553,7 +568,7 @@ Follow the existing conventions (CLAUDE.md, Tests section):
 - Zero questions: clearing the questions box and analysing shows "Add at least one question to score." and no board.
 - Questions survive the toggle: edit the questions, toggle analysis off and on, and the text area still holds the edited text (`persist_state="session"`).
 - Errors stay in the analysis slot: a `load` that raises `OSError` (offline) shows the one-line error in the analysis slot, the transcript card is present, and the "Transcription complete" toast fired. Repeat with a `ValueError` from the model, which must show `st.exception` in the analysis slot, not in place of the transcript.
-- Download notice: with analysis on and `try_to_load_from_cache` patched to return `None`, the "about 5 GB" caption is shown; patched to a path, it isn't.
+- Download notice: with analysis on and `try_to_load_from_cache` patched to return `None`, the "about 4 GB" caption is shown; patched to a path, it isn't.
 - **Not testable with AppTest** (manual checks after B7): the skeleton's height and appearance (AppTest sees only each run's final state, and has no skeleton accessor), Reduce Motion, and keyboard order. These belong to the Accessibility verification, not to the test suite.
 - Analysis on: one Analysis card in the transcript column **above** the transcript card (assert the order: Analysis card, then transcript card, after the `feedback` placeholder), the board present, and `load` called once with `revision=LLM_REVISION`.
 - An analysis failure keeps the transcript card plus an error inside the analysis area, and `result` stays in session state.
@@ -585,7 +600,7 @@ Follow the existing conventions (CLAUDE.md, Tests section):
   - `feat(ui): cap the layout width on large displays` (A6; Layout across displays, change 1)
   - `chore(deps): add mlx-lm for transcript analysis`
   - `test(pipeline): add transcript analysis evaluation` (the `evals/` script, labels, split and `.gitignore` entries, built during Phase 0)
-  - `feat(pipeline): summarise transcripts with granite 4.2 8b`
+  - `feat(pipeline): summarise transcripts with granite 4.2 3b`
   - `feat(pipeline): answer yes/no questions from cached transcript prefill`
   - `feat(ui): add transcript analysis card and questions`
   - `docs: document transcript analysis`
@@ -627,6 +642,6 @@ Follow the existing conventions (CLAUDE.md, Tests section):
 - **Calibration:** P(yes) from a base instruct model is a ranking, not a probability you can rely on. The evaluation measures how far off it is (Brier score and reliability table on about 90 held-out labels). Until those numbers say otherwise, the UI must not present it as a verdict.
 - **ASR errors carry through:** e.g. the fixture's `shapeare` and `libvox`. The prompt warns the model; the summary may still repeat misheard words.
 - **Memory at the edge of 16 GB:** both models stay cached after a run. If Phase 0 shows pressure, consider clearing the speech model's cached resource before analysis. But that costs a reload on the next Transcribe; measure before choosing.
-- **The model loads on first use:** the first analysis on a cold cache is a 4.95 GB download. The toggle's help text and the `show_time` spinner must make that visible.
+- **The model loads on first use:** the first analysis on a cold cache is a 3.89 GB download. The toggle's help text and the `show_time` spinner must make that visible.
 - **Prompt injection through audio:** see Security, rule 1. Showing output as plain text removes the way data could leak out; a manipulated summary is still possible, which is one more reason the card doesn't present itself as authoritative.
 - **Template drift:** a future revision of the chat template could change the `<think></think>` suffix or the prefix layout. The prefix-equality assertion and the Yes+No mass warning are the tripwires; the revision pin is what keeps them quiet.
