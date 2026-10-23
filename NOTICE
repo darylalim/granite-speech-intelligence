@@ -7,11 +7,17 @@ This application uses, but does not redistribute, the following third-party
 models and libraries, each under its own license:
 
 - IBM Granite Speech 5.0 470M TurboCTC (Apache-2.0)
+- IBM Granite 4.2 3B, 8-bit MLX conversion (Apache-2.0)
 - Silero VAD (MIT)
-- MLX / mlx-audio (MIT)
+- MLX / mlx-audio / mlx-lm (MIT)
 - Streamlit (Apache-2.0)
 - PyTorch, torchaudio (BSD-3-Clause)
 - PyAV (BSD-3-Clause), bundling FFmpeg (LGPL-3.0-or-later)
 
 Model weights are downloaded at runtime from the Hugging Face Hub and are
 not included in this repository.
+
+The evaluation labels in evals/labels.json are derived from the annotations
+of the AMI Meeting Corpus (CC BY 4.0, https://groups.inf.ed.ac.uk/ami/corpus/).
+The corpus audio and transcripts are fetched at evaluation time and are not
+included in this repository.

@@ -176,7 +176,7 @@ TRANSCRIPT_MAX_WIDTH_PX = 720
 LAYOUT_MAX_WIDTH_PX = 1280
 
 # Transcript analysis: Granite 4.2 3B, IBM's own 8-bit MLX conversion. Chosen
-# over the 8B q4 at PLAN.md's B4 on measurement: on ASR transcripts it ranks
+# over the 8B q4 at docs/PLAN.md's B4 on measurement: on ASR transcripts it ranks
 # yes/no answers 3-4 points of ROC-AUC lower (0.76 vs 0.79 pooled, held out)
 # and analyses 30 minutes in 22.6s against 44.8s, the 8B's miss being prefill
 # compute, which no memory setting could fix.
@@ -205,7 +205,7 @@ ANALYSIS_MAX_NEW_TOKENS = 512
 ANALYSIS_PREFILL_TOKENS = 2048
 # Summary tokens between on_progress calls, for the same reason.
 ANALYSIS_PROGRESS_TOKENS = 32
-# The prompt the evaluation chose (`evals`, "anyone"; PLAN.md, B3). The
+# The prompt the evaluation chose (`evals`, "anyone"; docs/PLAN.md, B3). The
 # transcript turn is identical for every task so its prefill is shared; the
 # caveat is the one IBM's Speech to Decisions Space gives. Change a word here
 # and the recorded scores no longer describe the app: re-run the evaluation.
@@ -261,7 +261,7 @@ SUMMARY_RETRY_PROMPT = (
     "That was not a valid JSON object with the keys topic, summary, topics and "
     "action_items. Return only that JSON object."
 )
-# The board's canonical caption (PLAN.md, Phase 2). It says how the rows are
+# The board's canonical caption (docs/PLAN.md, Phase 2). It says how the rows are
 # sorted, which a screen-reader user cannot see from the bar lengths, and it
 # says what the numbers are: the evaluation found P(yes) leaning towards No,
 # with 26-29% of answers under 0.2 labelled yes, so they rank, never decide.
@@ -1027,7 +1027,7 @@ def answer_questions(
     trimmed it back or straight from prefill_transcript on a board-only run.
     on_progress fires before each question, `(i, n, "question i+1 of n")`.
     A low Yes+No mass is warned about by question number and figure only,
-    never by text (PLAN.md, Security, rule 4).
+    never by text (docs/PLAN.md, Security, rule 4).
     """
     assert can_trim_prompt_cache(prefill.cache), "the transcript cache must trim"
     answer_ids = _yes_no_ids(tokenizer)
@@ -1176,7 +1176,7 @@ def _task_cache(
     prefix describes tokens the full prompt no longer starts with; that case
     runs the whole prompt on a fresh cache and warns, since a silent fallback
     would cost a second prefill with nothing to say why. The warning carries
-    no transcript text (PLAN.md, Security, rule 4).
+    no transcript text (docs/PLAN.md, Security, rule 4).
     """
     full = _chat_ids(tokenizer, [*prefill.messages, *turns], generation_prompt=True)
     if full[: len(prefill.ids)] == prefill.ids:
@@ -1356,7 +1356,7 @@ def analysis_markdown(summary: Summary, board: Board | None) -> str:
     """The analysis as a Markdown file, every model field escaped.
 
     The file leaves the app, and a Markdown viewer would otherwise turn an
-    image the transcript dictated into a fetch (PLAN.md, Security, rule 1).
+    image the transcript dictated into a fetch (docs/PLAN.md, Security, rule 1).
     The questions are escaped too: they are user text, and a `|` in one
     would split its table row.
     """
@@ -1499,7 +1499,7 @@ def _render_analysis_card(
 
     Every field the model wrote goes through st.text, never st.markdown: a
     transcript can carry spoken instructions, and a Markdown image in a
-    summary would make the browser fetch a URL with no click (PLAN.md,
+    summary would make the browser fetch a URL with no click (docs/PLAN.md,
     Security, rule 1). The bold labels are the app's own fixed strings. When
     `board` is None the placeholder is left for the caller, which puts the
     skeleton, the "Analyse" button or the no-questions caption there.

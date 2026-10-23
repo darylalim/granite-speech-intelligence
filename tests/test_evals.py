@@ -64,7 +64,7 @@ def test_labels_split_by_meeting_with_every_question_labelled() -> None:
         assert all(isinstance(v, bool) for v in e["labels"].values())
         assert e["end"] - e["start"] == 180
         halves[e["split"]].add(e["meeting"])
-    # Never one meeting's excerpts in both halves (PLAN.md, Evaluation).
+    # Never one meeting's excerpts in both halves (docs/PLAN.md, Evaluation).
     assert not halves["tune"] & halves["held"]
     assert sum(e["split"] == "tune" for e in excerpts) == 10
 

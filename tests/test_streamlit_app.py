@@ -1404,7 +1404,7 @@ class TestLoadLlm:
         mock_load.return_value = ("model", "tokenizer")
         assert _load_llm(LLM_ID, LLM_REVISION) == ("model", "tokenizer")
         # Exactly these arguments: in particular no trust_remote_code, which
-        # must stay at mlx_lm's False default (PLAN.md, Security, rule 2).
+        # must stay at mlx_lm's False default (docs/PLAN.md, Security, rule 2).
         mock_load.assert_called_once_with(LLM_ID, revision=LLM_REVISION)
 
     @patch("streamlit_app._load_llm")
@@ -1617,7 +1617,7 @@ class TestSummarizeTranscript:
         assert generate.prompts[0][0] == END_ID
         assert make_cache.call_count == 2
         assert prefill.cache[0].offset == len(prefill.ids)
-        # No transcript text in warnings (PLAN.md, Security, rule 4).
+        # No transcript text in warnings (docs/PLAN.md, Security, rule 4).
         assert all(transcript not in str(w.message) for w in record)
 
 

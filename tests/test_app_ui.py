@@ -955,7 +955,7 @@ def test_model_output_is_shown_as_plain_text(
 ) -> None:
     """Words in a recording reach the prompt, so a summary can carry Markdown
     the model was told to write. Every field is st.text, and no markdown
-    element in the card holds a link or image (PLAN.md, Security, rule 1)."""
+    element in the card holds a link or image (docs/PLAN.md, Security, rule 1)."""
     image, link = "![x](http://example.invalid/i)", "[x](http://example.invalid/l)"
     hostile = {
         "topic": image,

@@ -1,7 +1,7 @@
 """Scores for the yes/no board, by hand rather than via scikit-learn.
 
 The evaluation may import only the standard library and what is already in
-``uv.lock`` (PLAN.md, Evaluation), and each of these is a few lines.
+``uv.lock`` (docs/PLAN.md, Evaluation), and each of these is a few lines.
 """
 
 from collections.abc import Sequence

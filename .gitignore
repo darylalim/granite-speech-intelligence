@@ -20,6 +20,6 @@ dist/
 *.npz
 mlx_model/
 
-# Evaluation corpus data and results stay local (PLAN.md, Evaluation)
+# Evaluation corpus data and results stay local (docs/PLAN.md, Evaluation)
 evals/data/
 evals/results/

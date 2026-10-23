@@ -78,7 +78,7 @@ def excerpt_wav(meeting: str, start: float, end: float) -> bytes:
 def plain_text(transcript: str) -> str:
     """`run_pipeline`'s transcript without the `[M:SS - M:SS]` line prefixes.
 
-    The analysis is fed segment text only (PLAN.md, Phase 1): timestamps cost
+    The analysis is fed segment text only (docs/PLAN.md, Phase 1): timestamps cost
     tokens and invite made-up ones.
     """
     return " ".join(line.split("] ", 1)[-1] for line in transcript.splitlines()).strip()
