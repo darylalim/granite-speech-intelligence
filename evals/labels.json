@@ -1,6 +1,7 @@
 {
  "corpus": "AMI Meeting Corpus, manual annotations v1.6.2 and Mix-Headset audio (CC BY 4.0, AMI Consortium / University of Edinburgh)",
  "drafted": "2026-10-21",
+ "reviewed": "2026-10-23",
  "questions": {
   "asking": "Is the speaker asking a question?",
   "decision": "Is the speaker making a decision?",
@@ -18,7 +19,7 @@
   "Windows in the annotated series (ES, IS, TS) were chosen greedily from 30 s steps to balance yes and no per question within each half; the EN2002 windows (no dialogue-act, entity or summary layers) were fixed at 600 s, 900 s and 1500 s.",
   "'derived' is the label read from the annotations alone: asking = an Elicit-* dialogue act; decision / commit = an abstractive decisions / actions sentence linked to a dialogue act in the window (commit also on an Offer act); angry = a Be-Negative act; company = ORGANIZATION; money = MONEY; person = PERSON:OTHER or EXPERIMENTER; datetime = TIME or DATE; place = LOCATION.",
   "'labels' is the final label, checked by reading each excerpt's transcript; every disagreement with 'derived', and every borderline call, has a note. 'The speaker' is read as anyone in the excerpt, since the meetings have four. Mentions of cost or expense count as money; named software products count as products.",
-  "Drafted by Claude (an LLM) on the user's request and not yet reviewed by a person."
+  "Drafted by Claude (an LLM) on the user's request; reviewed by a person on 2026-10-23 against the human transcripts and kept as drafted, with no label or rule changed."
  ],
  "excerpts": [
   {
