@@ -29,7 +29,6 @@ import av
 import mlx.core as mx
 import streamlit as st
 import torch
-import torchaudio
 from huggingface_hub import try_to_load_from_cache
 from huggingface_hub.constants import HF_HUB_CACHE
 from huggingface_hub.errors import LocalEntryNotFoundError
@@ -726,9 +725,9 @@ def _best_audio_stream(
     return stream if isinstance(stream, av.AudioStream) else None
 
 
-def _decode_audio(data: bytes) -> tuple[torch.Tensor, int]:
-    """Decode a container's best audio stream to (channels, samples) float32
-    at its native rate, via PyAV.
+def _decode_audio(data: bytes) -> torch.Tensor:
+    """Decode a container's best audio stream to (1, samples) float32 mono at
+    SAMPLE_RATE, via PyAV.
 
     PyAV is the decoder because its wheels *bundle* FFmpeg. torchaudio's own
     path goes through torchcodec, which dlopen()s whatever FFmpeg Homebrew
@@ -737,13 +736,19 @@ def _decode_audio(data: bytes) -> tuple[torch.Tensor, int]:
     0.16 added the 9 loader but dropped the /opt/homebrew rpath from its
     dylibs, so on Apple Silicon it finds nothing at all. Neither is fixable
     from inside the process (dyld reads its search paths at launch), so the
-    app now depends on no system FFmpeg. torchaudio stays for its pure-torch
-    resampler, which never touches torchcodec.
+    app depends on no system FFmpeg.
 
-    Frames are converted to planar float32 at their own layout and
-    rate before concatenation: a pure sample-format conversion, so swresample
-    buffers nothing and every codec's output — packed or planar, s16 or
-    fltp — lands in the same (channels, samples) matrix scaled to [-1, 1].
+    Every frame goes through one swresample converter to planar float32 at
+    SAMPLE_RATE, then is downmixed by a channel mean, so only the 16 kHz mono
+    signal is ever held. Resampling the whole decode afterwards, as
+    torchaudio.functional.resample did, held the source-rate matrix and then
+    its conv buffers: on a 32-minute 48 kHz stereo upload the decode peaked
+    at 2.2 GB and the resample took that to 6.7 GB. The mean is linear, so taking it after
+    the rate change gives the signal the old mean-then-resample did, up to the
+    filter. The downmix stays here rather than in swresample (layout="mono")
+    because FFmpeg mixes stereo at 1/sqrt(2) per channel, not 1/2: +3 dB on
+    every stereo upload. At 16 kHz the conversion is a pure sample-format
+    one, bit-exact on 16-bit PCM.
     """
     with _open_container(data) as container:
         stream = _best_audio_stream(container)
@@ -760,39 +765,32 @@ def _decode_audio(data: bytes) -> tuple[torch.Tensor, int]:
         if stream.codec_context is None:
             codec = getattr(stream, "name", None) or "unknown"
             raise ValueError(f"no decoder is available for the audio codec ({codec})")
-        # The converter is built from the first decoded frame, not the stream
-        # header. The two normally agree, but HE-AAC with implicit SBR is
-        # the known exception: the header declares half the rate the frames
-        # carry, and a converter targeting the header's rate would have
-        # swresample downsample every frame to it — lossy, and reporting the
-        # wrong rate to the resample that follows. The header only serves
-        # the zero-frame case, where there is no frame to ask.
-        rate, channels = stream.rate, len(stream.layout.channels)
-        to_planar_float: av.AudioResampler | None = None
-        frames: list[torch.Tensor] = []
+        # The converter keeps the first decoded frame's layout, so swresample
+        # never rematrixes (see the docstring), and takes its input rate from
+        # the frames rather than the stream header: HE-AAC with implicit SBR
+        # declares half the rate its frames carry.
+        to_model_rate: av.AudioResampler | None = None
+        chunks: list[torch.Tensor] = []
         for frame in container.decode(stream):
-            if to_planar_float is None:
-                rate, channels = frame.sample_rate, len(frame.layout.channels)
-                to_planar_float = av.AudioResampler(
-                    format="fltp", layout=frame.layout, rate=rate
+            if to_model_rate is None:
+                to_model_rate = av.AudioResampler(
+                    format="fltp", layout=frame.layout, rate=SAMPLE_RATE
                 )
-            frames.extend(
-                torch.from_numpy(converted.to_ndarray())
-                for converted in to_planar_float.resample(frame)
-            )
-        if to_planar_float is not None:
-            frames.extend(
-                torch.from_numpy(converted.to_ndarray())
-                for converted in to_planar_float.resample(None)
-            )
-    if not frames:
-        return torch.zeros(channels, 0), rate
-    return torch.cat(frames, dim=1), rate
+            chunks.extend(_mono(c) for c in to_model_rate.resample(frame))
+        if to_model_rate is not None:
+            chunks.extend(_mono(c) for c in to_model_rate.resample(None))
+    if not chunks:
+        return torch.zeros(1, 0)
+    return torch.cat(chunks, dim=1)
+
+
+def _mono(frame: av.AudioFrame) -> torch.Tensor:
+    return torch.from_numpy(frame.to_ndarray()).mean(dim=0, keepdim=True)
 
 
 def load_and_preprocess_audio(audio_file: UploadedFile) -> torch.Tensor:
     try:
-        wav, sr = _decode_audio(audio_file.getvalue())
+        wav = _decode_audio(audio_file.getvalue())
     except Exception as e:
         raise RuntimeError(f"Failed to load audio file: {e}") from e
 
@@ -800,19 +798,12 @@ def load_and_preprocess_audio(audio_file: UploadedFile) -> torch.Tensor:
     # falls back to a zero-length full-audio segment) and dies inside the
     # port's compute_features as a ValueError ("audio must contain at least
     # one 10 ms frame"), which main() surfaces as an st.exception traceback
-    # where a RuntimeError gets the one-line st.error. Separate from the
-    # length floor below because it has to run before the resample, which
-    # raises its own opaque RuntimeError on an empty tensor at any rate but
-    # 16 kHz.
+    # where a RuntimeError gets the one-line st.error. Its own message rather
+    # than the length floor's, since nothing decoded is not a short clip.
     if wav.numel() == 0:
         raise RuntimeError("No audio detected: the file decoded to zero samples.")
-
-    if wav.shape[0] > 1:
-        wav = wav.mean(dim=0, keepdim=True)
-    if sr != SAMPLE_RATE:
-        wav = torchaudio.functional.resample(wav, sr, SAMPLE_RATE)
-    # After the resample, so the floor is measured in the model's samples, not
-    # the file's: 3000 samples at 48 kHz is 1000 here.
+    # In the model's samples, since the decode already resampled: 3000 samples
+    # at 48 kHz is 1000 here.
     if wav.shape[-1] < MIN_AUDIO_SAMPLES:
         raise RuntimeError(
             "Audio is too short: at least "

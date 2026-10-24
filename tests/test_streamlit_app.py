@@ -174,6 +174,32 @@ def latin1_tagged_wav(seconds: float = 1.0, rate: int = 16000) -> bytes:
     return bytes(data)
 
 
+def pcm_wav(samples: np.ndarray, rate: int) -> bytes:
+    """A 16-bit WAV from a (channels, n) float array in [-1, 1], at any rate:
+    the bundled fixtures are both 16 kHz mono, so without these the resample
+    in _decode_audio never runs on a real container."""
+    pcm = np.round(np.clip(samples, -1, 1) * 32767).astype("<i2")
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(samples.shape[0])
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(pcm.T.tobytes())
+    return buf.getvalue()
+
+
+def tones_wav(rate: int, seconds: float = 1.0) -> bytes:
+    """Stereo, with a different tone in each channel: 440 Hz at 0.5 on the
+    left, 1000 Hz at 0.25 on the right."""
+    t = np.arange(round(rate * seconds)) / rate
+    return pcm_wav(
+        np.stack(
+            [0.5 * np.sin(2 * np.pi * 440 * t), 0.25 * np.sin(2 * np.pi * 1000 * t)]
+        ),
+        rate,
+    )
+
+
 def _mux_pcm(out: Any, stream: Any, seconds: float, layout: str, channels: int) -> None:
     n = int(seconds * 16000)
     pcm = np.random.default_rng(0).integers(-2000, 2000, size=(1, n * channels))
@@ -851,15 +877,13 @@ class TestLoadAndPreprocessAudio:
         # mlx_audio's compute_features as a ValueError, which main() shows as
         # an st.exception traceback rather than the one-line st.error.
         with (
-            patch(
-                "streamlit_app._decode_audio", return_value=(torch.zeros(1, 0), 16000)
-            ),
+            patch("streamlit_app._decode_audio", return_value=torch.zeros(1, 0)),
             pytest.raises(RuntimeError, match="No audio detected"),
         ):
             load_and_preprocess_audio(make_upload(AUDIO_DIR / "sample_10s.wav"))
 
     @pytest.mark.parametrize(
-        ("samples", "sr"),
+        ("samples", "rate"),
         [
             # One under the floor at the model's own rate.
             (MIN_AUDIO_SAMPLES - 1, SAMPLE_RATE),
@@ -869,25 +893,19 @@ class TestLoadAndPreprocessAudio:
         ],
     )
     def test_audio_under_the_floor_raises_a_readable_error(
-        self, samples: int, sr: int
+        self, samples: int, rate: int
     ) -> None:
         # Verified against the real model: 1119 samples dies as an opaque
         # [conv] ValueError inside the encoder, 1120 decodes.
-        with (
-            patch(
-                "streamlit_app._decode_audio",
-                return_value=(torch.zeros(1, samples), sr),
-            ),
-            pytest.raises(RuntimeError, match="Audio is too short"),
-        ):
-            load_and_preprocess_audio(make_upload(AUDIO_DIR / "sample_10s.wav"))
+        raw = pcm_wav(np.zeros((1, samples)), rate)
+        with pytest.raises(RuntimeError, match="Audio is too short"):
+            load_and_preprocess_audio(make_upload(raw=raw, name="short.wav"))
 
-    def test_audio_at_the_floor_loads(self) -> None:
-        with patch(
-            "streamlit_app._decode_audio",
-            return_value=(torch.zeros(1, MIN_AUDIO_SAMPLES), SAMPLE_RATE),
-        ):
-            wav = load_and_preprocess_audio(make_upload(AUDIO_DIR / "sample_10s.wav"))
+    @pytest.mark.parametrize("rate", [SAMPLE_RATE, 48000])
+    def test_audio_at_the_floor_loads(self, rate: int) -> None:
+        samples = MIN_AUDIO_SAMPLES * rate // SAMPLE_RATE
+        raw = pcm_wav(np.zeros((1, samples)), rate)
+        wav = load_and_preprocess_audio(make_upload(raw=raw, name="floor.wav"))
         assert wav.shape == (1, MIN_AUDIO_SAMPLES)
 
     def test_invalid_audio_raises_runtime_error(self) -> None:
@@ -921,23 +939,37 @@ class TestLoadAndPreprocessAudio:
         assert wav.shape == (1, 16000)
 
     def test_picks_the_default_track_not_the_first(self) -> None:
-        wav, rate = _decode_audio(two_track_mkv())
-        assert (wav.shape, rate) == ((2, 32000), 16000)
+        # Two seconds of the default stereo track, not one of the mono.
+        assert _decode_audio(two_track_mkv()).shape == (1, 32000)
 
     def test_codec_without_decoder_raises_readable_error(self) -> None:
         with pytest.raises(RuntimeError, match="no decoder is available"):
             load_and_preprocess_audio(make_upload(raw=undecodable_mkv(), name="u.mkv"))
 
-    def test_stereo_is_downmixed_after_decode(self) -> None:
-        # Two channels in, one out, and the decode still reports the native
-        # rate so the resample happens on the mono signal.
-        with patch(
-            "streamlit_app._decode_audio",
-            return_value=(torch.stack([torch.ones(32000), -torch.ones(32000)]), 16000),
-        ):
-            wav = load_and_preprocess_audio(make_upload(AUDIO_DIR / "sample_10s.wav"))
-        assert wav.shape == (1, 32000)
-        assert torch.equal(wav, torch.zeros(1, 32000))
+    @pytest.mark.parametrize("rate", [SAMPLE_RATE, 48000])
+    def test_stereo_is_downmixed_by_the_mean(self, rate: int) -> None:
+        # The mean, not FFmpeg's own stereo-to-mono matrix, which mixes each
+        # channel at 1/sqrt(2) and would read 0.354 here: +3 dB on every
+        # stereo upload.
+        n = rate // 4
+        raw = pcm_wav(np.stack([np.full(n, 0.5), np.zeros(n)]), rate)
+        wav = load_and_preprocess_audio(make_upload(raw=raw, name="s.wav"))
+        # Away from the edges, where the resample filter rings at 48 kHz.
+        middle = wav[0, 400:-400]
+        assert torch.allclose(middle, torch.full_like(middle, 0.25), atol=1e-3)
+
+    @pytest.mark.parametrize("rate", [48000, 44100, 22050, 8000])
+    def test_resamples_to_the_model_rate(self, rate: int) -> None:
+        # 44.1 kHz is the non-integer ratio, 8 kHz the upsample. Each tone
+        # keeps its frequency and the mean's half amplitude: 0.25 at 440 Hz,
+        # 0.125 at 1000 Hz. One second at 16 kHz gives 1 Hz FFT bins.
+        wav = load_and_preprocess_audio(make_upload(raw=tones_wav(rate), name="t.wav"))
+        assert wav.shape == (1, SAMPLE_RATE)
+        spectrum = np.abs(np.fft.rfft(wav[0].numpy())) * 2 / SAMPLE_RATE
+        assert spectrum[440] == pytest.approx(0.25, abs=0.005)
+        assert spectrum[1000] == pytest.approx(0.125, abs=0.005)
+        spectrum[[440, 1000]] = 0
+        assert spectrum.max() < 0.005
 
 
 class TestAudioDurationSeconds:
