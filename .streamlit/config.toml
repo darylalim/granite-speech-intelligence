@@ -23,9 +23,9 @@ maxUploadSize = 500
 # Wi-Fi could upload files for FFmpeg to parse and run the models.
 address = "localhost"
 # Reload-on-save is an editing convenience, and the watcher it needs probes
-# every loaded module: transformers' lazy loader answers by importing image
-# processors that need torchvision, which is not installed, and Streamlit
-# logged ~100 tracebacks per session. Developing? Pass
+# every loaded module: transformers' lazy loader answers by importing modules
+# that need torch or torchvision, neither of which is installed, and Streamlit
+# logged ~226 tracebacks per session (2026-10-24). Developing? Pass
 # `--server.fileWatcherType auto` on the command line.
 fileWatcherType = "none"
 
