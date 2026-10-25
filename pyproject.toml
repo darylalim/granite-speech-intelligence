@@ -1,7 +1,7 @@
 [project]
 name = "granite-speech-intelligence"
 version = "0.19.0"
-description = "Offline English speech-to-text on Apple Silicon: IBM Granite Speech 5.0 TurboCTC on MLX, with Silero VAD timestamps, plus on-device summaries and yes/no questions from Granite 4.2, in a Streamlit app."
+description = "Offline English speech-to-text on Apple Silicon, all on MLX: IBM Granite Speech 5.0 TurboCTC with Silero VAD timestamps, plus on-device summaries and yes/no questions from Granite 4.2, in a Streamlit app."
 requires-python = ">=3.12"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]

@@ -4,7 +4,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 
-Offline English speech-to-text on Apple Silicon: IBM Granite Speech 5.0 TurboCTC on MLX, with Silero VAD timestamps, plus on-device summaries and yes/no questions from Granite 4.2, in a Streamlit app.
+Offline English speech-to-text on Apple Silicon, all on MLX: IBM Granite Speech 5.0 TurboCTC with Silero VAD timestamps, plus on-device summaries and yes/no questions from Granite 4.2, in a Streamlit app.
 
 <p align="center">
   <img src="docs/screenshot-dark.png" alt="Granite Speech Intelligence in dark mode, showing a timestamped transcription of the sample clip" width="70%">
