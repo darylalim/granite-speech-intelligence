@@ -7,9 +7,9 @@
 Offline English speech-to-text on Apple Silicon, all on MLX: IBM Granite Speech 5.0 TurboCTC with Silero VAD timestamps, plus on-device summaries and yes/no questions from Granite 4.2, in a Streamlit app.
 
 <p align="center">
-  <img src="docs/screenshot-dark.png" alt="Granite Speech Intelligence in dark mode, showing a timestamped transcription of the sample clip" width="70%">
+  <img src="docs/screenshot-dark.png" alt="Granite Speech Intelligence in dark mode, showing an analysis card with a topic, summary, key topics, action items and nine yes/no questions ranked by probability, above a timestamped transcription of a one-minute team meeting" width="70%">
 </p>
-<p align="center"><em>Timestamped transcription of the sample clip, in dark mode.</em></p>
+<p align="center"><em>Analysis and timestamped transcription of a one-minute synthesised team meeting, in dark mode.</em></p>
 
 ## Features
 
