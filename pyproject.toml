@@ -12,22 +12,16 @@ dependencies = [
     # open, and 19 removed the metadata_errors= switch that worked around it.
     "av>=19.0.0",
     "mlx-audio>=0.5.1",
-    # Transcript analysis (Granite 4.2 8B). The floor is the release its API
+    # Transcript analysis (Granite 4.2 3B). The floor is the release its API
     # (load, generate_step, prompt caches) was checked against.
     "mlx-lm>=0.32.2",
-    # Pinned: this checkpoint is the other half of the bit-exact pair that
-    # MLX_VAD_REVISION freezes, and 6.1/5.x ship different weights; the .jit
-    # is byte-identical across 6.2.1-6.2.3. 6.2.2 was skipped: it declared
-    # `torchaudio<2.10` (dragging torch 2.14 -> 2.9.1) and imported
-    # onnxruntime at package import. 6.2.3 moved torchaudio to the `audio`
-    # extra and imports onnxruntime lazily. Exact, not a floor, so
-    # `uv lock --upgrade` never picks up a release that reintroduces either.
-    "silero-vad==6.2.3",
+    # The waveform type (it replaced torch.Tensor). mlx and mlx-audio pull it
+    # in anyway; declared because the app builds its arrays directly.
+    "numpy",
     # st.space (the stretch spacer that floats the toggle and the download
     # button right) landed in 1.51.0; everything else the layout uses —
     # horizontal containers, container/button width= — is 1.48.0.
     "streamlit>=1.51.0",
-    "torch",
 ]
 
 [dependency-groups]

@@ -9,9 +9,10 @@ without an upstream patch would fetch the real ~0.9 GB speech model and the
 MLX VAD checkpoint from the Hub.
 
 The Run tests are hermetic: the speech model is stubbed at its loader, and the
-MLX VAD loader is made to fail so load_vad_model takes its documented fallback
-onto the PyTorch build that ships inside the silero-vad wheel — real VAD spans
-on the fixture, nothing downloaded.
+MLX VAD loader is made to fail as it would offline, so a run that reached it by
+mistake would show an error rather than fetch. The one VAD-on run hands the
+loader the real 1.2 MB checkpoint at the pinned revision, loaded outside the
+app (and skipped when it cannot be) — real VAD spans on the fixture.
 
 Layout assertions go through `at.sidebar`, `at.main` and the two `at.columns`
 rather than the whole-tree accessors: AppTest walks main before the sidebar
@@ -29,13 +30,14 @@ from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from fractions import Fraction
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 from unittest.mock import MagicMock, patch
 
 import av
 import pytest
 import streamlit as st
 from huggingface_hub.errors import LocalEntryNotFoundError
+from mlx_audio.vad.utils import load_model as load_mlx_vad
 from streamlit import config
 from streamlit.proto.Block_pb2 import Block
 from streamlit.proto.Common_pb2 import FileURLs
@@ -55,6 +57,8 @@ from streamlit_app import (
     LLM_ID,
     LLM_REVISION,
     MLX_CACHE_LIMIT_BYTES,
+    MLX_VAD_REPO,
+    MLX_VAD_REVISION,
     MODEL_ID,
     MODEL_REVISION,
     TRANSCRIPT_MAX_WIDTH_PX,
@@ -163,14 +167,27 @@ def _fixture_samples() -> int:
 def _offline_mlx_vad() -> Generator[MagicMock]:
     """Make the MLX VAD loader fail as it would with no cache and no network.
 
-    load_vad_model then falls back to the PyTorch build bundled in the
-    silero-vad wheel, whose 16 kHz weights are bit-exact with the MLX
-    checkpoint — so the spans are the real ones, and nothing is fetched.
+    load_vad_model turns that into its one-line RuntimeError; there is no
+    second backend to fall back on. The VAD-off runs wear it as a guard, so
+    nothing they do can fetch the checkpoint.
     """
     with patch(
         "mlx_audio.vad.utils.load_model", side_effect=OSError("offline")
     ) as loader:
         yield loader
+
+
+@pytest.fixture(scope="module")
+def real_vad_model() -> Any:
+    """The real MLX VAD at MLX_VAD_REVISION, loaded outside the app.
+
+    1.2 MB, fetched once when not cached. Loaded here rather than inside the
+    script run so an unreachable Hub skips the test instead of failing it.
+    """
+    try:
+        return load_mlx_vad(MLX_VAD_REPO, revision=MLX_VAD_REVISION)
+    except Exception as e:  # noqa: BLE001 - any failure means skip
+        pytest.skip(f"{MLX_VAD_REPO} unavailable: {e}")
 
 
 def _upload_and_run(audio_bytes: bytes, *, use_segmentation: bool) -> AppTest:
@@ -636,22 +653,21 @@ def test_duration_cache_is_single_slot(audio_bytes: bytes) -> None:
 
 
 def test_run_with_vad_on_renders_a_timestamped_transcript(
-    audio_bytes: bytes, speech_loader: MagicMock
+    audio_bytes: bytes, speech_loader: MagicMock, real_vad_model: Any
 ) -> None:
     """VAD on: one card with a timestamped transcript and nothing else. The VAD
     path trims the fixture's 0.76 s digital-silence lead-in, so the one segment
     starts past zero (still formatting as 0:00) and is shorter than the clip."""
-    with (
-        _offline_mlx_vad() as vad_loader,
-        pytest.warns(RuntimeWarning, match="using the PyTorch VAD"),
-    ):
+    with patch(
+        "mlx_audio.vad.utils.load_model", return_value=real_vad_model
+    ) as vad_loader:
         at = _upload_and_run(audio_bytes, use_segmentation=True)
     _assert_single_result_card(at)
     # Guards: every model came from a patch, not the Hub.
     speech_loader.assert_called_once_with(
         MODEL_ID, revision=MODEL_REVISION, strict=True
     )
-    vad_loader.assert_called_once()
+    vad_loader.assert_called_once_with(MLX_VAD_REPO, revision=MLX_VAD_REVISION)
 
     assert at.text[0].value == "[0:00 - 0:09] hello world"
     generate = speech_loader.return_value.generate
@@ -742,6 +758,27 @@ def test_reuploading_an_identical_file_discards_the_result(
     assert len(at.subheader) == 0
     assert "result" not in at.session_state
     assert "result_stem" not in at.session_state
+
+
+def test_vad_that_will_not_load_shows_a_readable_error(
+    audio_bytes: bytes, speech_loader: MagicMock
+) -> None:
+    """Offline with the VAD checkpoint uncached: the one-line st.error naming
+    the way out (VAD off), in the transcript slot, and no card. There is no
+    other VAD to fall back on since torch went."""
+    with _offline_mlx_vad() as vad_loader:
+        at = _upload_and_run(audio_bytes, use_segmentation=True)
+    vad_loader.assert_called_once()
+    assert not at.exception
+    (error,) = at.error
+    assert "Turn off VAD segmentation" in error.value
+    assert error.icon == ":material/error:"
+    assert len(at.get("progress")) == 0
+    assert len(at.toast) == 0
+    assert len(at.subheader) == 0
+    assert "result" not in at.session_state
+    _input_col, transcript = at.columns
+    assert len(transcript.error) == 1
 
 
 def test_undecodable_upload_shows_a_readable_error(speech_loader: MagicMock) -> None:

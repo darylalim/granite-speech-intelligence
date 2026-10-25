@@ -11,7 +11,7 @@ models and libraries, each under its own license:
 - Silero VAD (MIT)
 - MLX / mlx-audio / mlx-lm (MIT)
 - Streamlit (Apache-2.0)
-- PyTorch, torchaudio (BSD-3-Clause)
+- NumPy (BSD-3-Clause)
 - PyAV (BSD-3-Clause), bundling FFmpeg (LGPL-3.0-or-later)
 
 Model weights are downloaded at runtime from the Hugging Face Hub and are

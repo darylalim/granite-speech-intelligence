@@ -14,7 +14,6 @@ import av
 import mlx.core as mx
 import numpy as np
 import pytest
-import torch
 from av.stream import Disposition
 
 from streamlit_app import (
@@ -55,11 +54,13 @@ from streamlit_app import (
     _inference_turn,
     _labeled_toggle,
     _mlx_vad_probabilities,
+    _mlx_vad_spans,
     _mlx_vad_windows,
     _render_analysis_card,
     _render_result_card,
     _skipped_questions_captions,
     _split_long_segment,
+    _streaming_vad_spans,
     _supports_mlx_vad,
     analysis_markdown,
     answer_questions,
@@ -304,7 +305,7 @@ def test_max_vad_off_duration_is_thirty_minutes() -> None:
     # block-local so there is no context to run out of, and peak MLX memory
     # grows linearly at ~2 MB per second of audio — measured 4.5 GB at 30
     # minutes and 7.8 GB at an hour. MLX is not the whole process, though:
-    # the PyAV decode at the source rate and the torch baseline sit
+    # the decoded audio and, when measured, the torch baseline sat
     # alongside it, which is what rules the hour out on 16 GB (the ~7 GB and
     # past-10 GB process figures in the constant's comment include the
     # since-removed guardian and err ~0.5 GB high; the MLX peaks do not).
@@ -410,13 +411,17 @@ def test_select_source(
 _MLX_VAD_MODEL_ATTRS = ("vad_16k", "config", "dtype", "_probs_to_timestamps")
 
 
-def make_mlx_vad_model(drop: str | None = None) -> MagicMock:
+def make_mlx_vad_model(drop: str | None = None, streaming: bool = False) -> MagicMock:
     """A model shaped like mlx_audio's, optionally missing one probed name.
 
     spec= throughout so hasattr answers honestly — a bare MagicMock would
     conjure every attribute the probe asks for and never report drift.
+    `streaming` adds the public get_speech_timestamps the fallback calls,
+    which the probe does not ask for.
     """
     model_attrs = [a for a in _MLX_VAD_MODEL_ATTRS if a != drop]
+    if streaming:
+        model_attrs.append("get_speech_timestamps")
     model = MagicMock(spec=model_attrs)
     if "dtype" in model_attrs:
         model.dtype = mx.float32
@@ -435,32 +440,27 @@ def make_mlx_vad_model(drop: str | None = None) -> MagicMock:
     return model
 
 
-class TestSileroVad:
-    """The PyTorch path, which is now the fallback rather than the default."""
+class TestStreamingVad:
+    """mlx_audio's public get_speech_timestamps, the fallback path."""
 
     def test_returns_tuples_in_seconds(self) -> None:
-        mock_timestamps = [
+        model = MagicMock(spec=["get_speech_timestamps"])
+        model.get_speech_timestamps.return_value = [
             {"start": 16000, "end": 48000},
             {"start": 64000, "end": 96000},
         ]
-        with patch("streamlit_app.get_speech_timestamps", return_value=mock_timestamps):
-            result = silero_vad(torch.zeros(1, 160000), MagicMock(spec=torch.nn.Module))
+        result = silero_vad(np.zeros(160000, dtype=np.float32), model)
         assert result == [(1.0, 3.0), (4.0, 6.0)]
 
-    def test_empty_audio_returns_empty_list(self) -> None:
-        with patch("streamlit_app.get_speech_timestamps", return_value=[]):
-            assert (
-                silero_vad(torch.zeros(1, 16000), MagicMock(spec=torch.nn.Module)) == []
-            )
-
-    def test_passes_model_and_sample_rate(self) -> None:
-        model = MagicMock(spec=torch.nn.Module)
-        wav = torch.zeros(1, 16000)
-        with patch("streamlit_app.get_speech_timestamps", return_value=[]) as mock_fn:
-            silero_vad(wav, model)
-        assert torch.equal(mock_fn.call_args[0][0], wav.squeeze())
-        assert mock_fn.call_args[0][1] is model
-        assert mock_fn.call_args[1]["sampling_rate"] == 16000
+    def test_passes_the_waveform_at_the_model_rate(self) -> None:
+        model = MagicMock(spec=["get_speech_timestamps"])
+        model.get_speech_timestamps.return_value = []
+        wav = np.zeros(16000, dtype=np.float32)
+        assert silero_vad(wav, model) == []
+        assert model.get_speech_timestamps.call_args.args[0] is wav
+        assert model.get_speech_timestamps.call_args.kwargs == {
+            "sample_rate": SAMPLE_RATE
+        }
 
 
 class TestSupportsMlxVad:
@@ -495,10 +495,13 @@ class TestSupportsMlxVad:
 
 
 class TestSileroVadDispatch:
-    def test_torch_model_takes_the_torch_path(self) -> None:
-        with patch("streamlit_app.get_speech_timestamps", return_value=[]) as mock_fn:
-            silero_vad(torch.zeros(1, 16000), MagicMock(spec=torch.nn.Module))
-        mock_fn.assert_called_once()
+    def test_a_model_the_probe_rejects_takes_the_streaming_path(self) -> None:
+        model = make_mlx_vad_model(drop="_probs_to_timestamps", streaming=True)
+        model.get_speech_timestamps.return_value = []
+        with patch("streamlit_app._mlx_vad_probabilities") as mock_probs:
+            silero_vad(np.zeros(16000, dtype=np.float32), model)
+        mock_probs.assert_not_called()
+        model.get_speech_timestamps.assert_called_once()
 
     def test_mlx_model_takes_the_batched_path(self) -> None:
         model = make_mlx_vad_model()
@@ -506,15 +509,15 @@ class TestSileroVadDispatch:
         with patch(
             "streamlit_app._mlx_vad_probabilities", return_value=mx.zeros((4,))
         ) as mock_probs:
-            result = silero_vad(torch.zeros(1, 160000), model)
+            result = silero_vad(np.zeros(160000, dtype=np.float32), model)
         mock_probs.assert_called_once()
         assert result == [(1.0, 3.0)]
         assert model._probs_to_timestamps.call_args[1]["audio_len"] == 160000
 
     def test_threshold_config_reaches_the_timestamp_scan(self) -> None:
         # The four values the probe checks for must be the four actually used.
-        # Hardcode any of them and the PyTorch fallback keeps its own defaults,
-        # so a repo shipping a non-default threshold makes the backends disagree.
+        # Hardcode any of them and the streaming fallback keeps the config's,
+        # so a repo shipping a non-default threshold makes the paths disagree.
         model = make_mlx_vad_model()
         model._probs_to_timestamps.return_value = []
         sentinels = {
@@ -526,42 +529,24 @@ class TestSileroVadDispatch:
         for name, value in sentinels.items():
             setattr(model.config, name, value)
         with patch("streamlit_app._mlx_vad_probabilities", return_value=mx.zeros((4,))):
-            silero_vad(torch.zeros(1, 16000), model)
+            silero_vad(np.zeros(16000, dtype=np.float32), model)
         kwargs = model._probs_to_timestamps.call_args[1]
         assert {name: kwargs[name] for name in sentinels} == sentinels
 
-    def test_non_16k_audio_never_reaches_the_mlx_model(self) -> None:
-        # The v6 conversion ships no trained 8 kHz weights, but mlx_audio builds
-        # that branch anyway and loads non-strictly, so an 8 kHz call would run
-        # randomly initialised layers and return confident nonsense.
-        model = make_mlx_vad_model()
-        with (
-            patch("streamlit_app._torch_vad_model") as mock_load,
-            patch("streamlit_app.get_speech_timestamps", return_value=[]) as mock_fn,
-            patch("streamlit_app._mlx_vad_probabilities") as mock_probs,
-        ):
-            silero_vad(torch.zeros(1, 8000), model, sample_rate=8000)
-        mock_probs.assert_not_called()
-        assert mock_fn.call_args[0][1] is mock_load.return_value
-
-    def test_mlx_failure_warns_and_falls_back_to_torch(self) -> None:
+    def test_mlx_failure_warns_and_falls_back_to_streaming(self) -> None:
         # hasattr only catches renames; a changed signature lands here instead.
-        model = make_mlx_vad_model()
+        model = make_mlx_vad_model(streaming=True)
+        model.get_speech_timestamps.return_value = [{"start": 0, "end": 16000}]
         with (
             patch(
                 "streamlit_app._mlx_vad_probabilities",
                 side_effect=TypeError("unexpected keyword"),
             ),
-            patch("streamlit_app._torch_vad_model") as mock_load,
-            patch(
-                "streamlit_app.get_speech_timestamps",
-                return_value=[{"start": 0, "end": 16000}],
-            ) as mock_fn,
             pytest.warns(RuntimeWarning, match="MLX VAD failed"),
         ):
-            result = silero_vad(torch.zeros(1, 16000), model)
+            result = silero_vad(np.zeros(16000, dtype=np.float32), model)
         assert result == [(0.0, 1.0)]
-        assert mock_fn.call_args[0][1] is mock_load.return_value
+        model.get_speech_timestamps.assert_called_once()
 
 
 class TestMlxVadInternals:
@@ -655,43 +640,41 @@ class TestMlxVadInternals:
         with patch(
             "streamlit_app._mlx_vad_probabilities", return_value=mx.zeros((4,))
         ) as mock_probs:
-            silero_vad(torch.zeros(1, 16000), model)
+            silero_vad(np.zeros(16000, dtype=np.float32), model)
         assert mock_probs.call_args[0][1].dtype == mx.float16
 
-    def test_both_backends_agree_on_real_audio(self) -> None:
+    def test_both_paths_match_the_reference_spans_on_real_audio(self) -> None:
         """Real weights, real speech, both paths — spans must match exactly.
 
         The tests above run random weights, so they prove the batching is
-        arithmetically equivalent but say nothing about the two *checkpoints*
-        agreeing. Pinning MLX_VAD_REVISION froze one side of that pair and
-        `silero-vad==6.2.1` freezes the other, so while both pins stand this is
-        a tripwire for the pins themselves; it becomes load-bearing again the
-        moment the silero-vad pin is lifted, when a `uv lock` could bump it to
-        a future Silero release and leave the backends disagreeing with
-        nothing else to notice.
+        arithmetically equivalent but say nothing about the checkpoint. The
+        expected spans are what the PyTorch build of the same checkpoint
+        (`silero-vad` 6.2.3, the fallback until torch was dropped) returned on
+        this fixture, and the MLX paths matched it to the sample, so this
+        keeps that agreement pinned with the reference no longer installed.
 
         Skipped rather than failed when the repo cannot be fetched — an offline
         CI run should not turn red over a network absence.
         """
-        from silero_vad import load_silero_vad
-
         from streamlit_app import _load_mlx_vad_model
 
         try:
-            mlx_model = _load_mlx_vad_model(MLX_VAD_REPO)
+            mlx_model = _load_mlx_vad_model(MLX_VAD_REPO, revision=MLX_VAD_REVISION)
         except Exception as e:  # noqa: BLE001 - any failure means skip
             pytest.skip(f"{MLX_VAD_REPO} unavailable: {e}")
         if not _supports_mlx_vad(mlx_model):  # pragma: no cover - upstream drift
             pytest.skip("mlx_audio VAD internals have moved")
 
         wav = load_and_preprocess_audio(make_upload(AUDIO_DIR / "sample_10s.wav"))
-        assert silero_vad(wav, mlx_model) == silero_vad(wav, load_silero_vad())
+        expected = [(1.058, 2.75), (3.298, 4.574), (5.218, 7.07), (7.618, 9.9929375)]
+        assert _mlx_vad_spans(wav, mlx_model) == expected
+        assert _streaming_vad_spans(wav, mlx_model) == expected
 
 
 class TestGetSpeechSegments:
     @staticmethod
     def _run(
-        wav: torch.Tensor,
+        wav: np.ndarray,
         vad_segments: list[tuple[float, float]],
         max_segment_duration: float = MAX_SEGMENT_DURATION_S,
     ) -> list[dict[str, float]]:
@@ -701,32 +684,32 @@ class TestGetSpeechSegments:
             )
 
     def test_adds_start_and_end_buffer(self) -> None:
-        result = self._run(torch.zeros(1, 160000), [(1.0, 2.0)])
+        result = self._run(np.zeros(160000, dtype=np.float32), [(1.0, 2.0)])
         assert result[0]["start"] == pytest.approx(0.7)
         assert result[0]["end"] == pytest.approx(2.3)
 
     def test_clamps_start_buffer_to_zero(self) -> None:
-        result = self._run(torch.zeros(1, 160000), [(0.1, 1.0)])
+        result = self._run(np.zeros(160000, dtype=np.float32), [(0.1, 1.0)])
         assert result[0]["start"] == 0.0
 
     def test_clamps_end_buffer_to_duration(self) -> None:
         # 2 seconds at 16 kHz
-        result = self._run(torch.zeros(1, 32000), [(0.5, 1.9)])
+        result = self._run(np.zeros(32000, dtype=np.float32), [(0.5, 1.9)])
         assert result[0]["end"] == 2.0
 
     def test_merges_close_segments(self) -> None:
-        result = self._run(torch.zeros(1, 160000), [(1.0, 2.0), (2.3, 3.0)])
+        result = self._run(np.zeros(160000, dtype=np.float32), [(1.0, 2.0), (2.3, 3.0)])
         assert len(result) == 1
         assert result[0]["start"] == pytest.approx(0.7)
         assert result[0]["end"] == pytest.approx(3.3)
 
     def test_keeps_distant_segments_separate(self) -> None:
-        result = self._run(torch.zeros(1, 160000), [(1.0, 2.0), (5.0, 6.0)])
+        result = self._run(np.zeros(160000, dtype=np.float32), [(1.0, 2.0), (5.0, 6.0)])
         assert len(result) == 2
 
     def test_no_speech_falls_back_to_full_audio(self) -> None:
         # 10 seconds at 16 kHz, covered end to end but still subject to the cap.
-        result = self._run(torch.zeros(1, 160000), [])
+        result = self._run(np.zeros(160000, dtype=np.float32), [])
         assert result[0]["start"] == 0.0
         assert result[-1]["end"] == pytest.approx(10.0)
         assert all(
@@ -737,14 +720,18 @@ class TestGetSpeechSegments:
         # Both spans are within min_gap, so the old code merged them into one
         # 9.3s segment. With a 5s cap the merge must not happen.
         result = self._run(
-            torch.zeros(1, 160000), [(1.0, 5.0), (5.2, 9.0)], max_segment_duration=5.0
+            np.zeros(160000, dtype=np.float32),
+            [(1.0, 5.0), (5.2, 9.0)],
+            max_segment_duration=5.0,
         )
         assert len(result) == 2
 
     def test_continuous_speech_does_not_collapse_into_one_segment(self) -> None:
         # 60s of speech with sub-min_gap breaks: previously one 60s segment.
         vad = [(float(i), i + 0.9) for i in range(60)]
-        result = self._run(torch.zeros(1, 16000 * 60), vad, max_segment_duration=10.0)
+        result = self._run(
+            np.zeros(16000 * 60, dtype=np.float32), vad, max_segment_duration=10.0
+        )
         assert len(result) > 1
         assert all(seg["end"] - seg["start"] <= 10.0 + 1e-6 for seg in result)
 
@@ -755,7 +742,9 @@ class TestGetSpeechSegments:
         # floor (a cap at or below the floor clamps the floor to the cap, and
         # the parts then land at or above the cap instead).
         result = self._run(
-            torch.zeros(1, 16000 * 100), [(0.3, 91.3)], max_segment_duration=30.0
+            np.zeros(16000 * 100, dtype=np.float32),
+            [(0.3, 91.3)],
+            max_segment_duration=30.0,
         )
         assert len(result) == 4
         durations = [seg["end"] - seg["start"] for seg in result]
@@ -764,7 +753,9 @@ class TestGetSpeechSegments:
 
     def test_split_parts_are_contiguous_and_cover_the_span(self) -> None:
         result = self._run(
-            torch.zeros(1, 16000 * 100), [(0.3, 91.3)], max_segment_duration=30.0
+            np.zeros(16000 * 100, dtype=np.float32),
+            [(0.3, 91.3)],
+            max_segment_duration=30.0,
         )
         assert result[0]["start"] == pytest.approx(0.0)
         assert result[-1]["end"] == pytest.approx(91.6)
@@ -772,13 +763,15 @@ class TestGetSpeechSegments:
             assert earlier["end"] == pytest.approx(later["start"])
 
     def test_no_speech_fallback_is_also_capped(self) -> None:
-        result = self._run(torch.zeros(1, 16000 * 75), [], max_segment_duration=30.0)
+        result = self._run(
+            np.zeros(16000 * 75, dtype=np.float32), [], max_segment_duration=30.0
+        )
         assert len(result) == 3
         assert all(seg["end"] - seg["start"] <= 30.0 + 1e-6 for seg in result)
 
     def test_short_segments_are_untouched(self) -> None:
         result = self._run(
-            torch.zeros(1, 160000), [(1.0, 2.0)], max_segment_duration=10.0
+            np.zeros(160000, dtype=np.float32), [(1.0, 2.0)], max_segment_duration=10.0
         )
         assert result == [{"start": pytest.approx(0.7), "end": pytest.approx(2.3)}]
 
@@ -789,7 +782,9 @@ class TestGetSpeechSegments:
         # be clamped or the same audio is transcribed twice and the rendered
         # timestamps run backwards.
         vad = [(float(i), i + 0.9) for i in range(60)]
-        result = self._run(torch.zeros(1, 16000 * 60), vad, max_segment_duration=8.0)
+        result = self._run(
+            np.zeros(16000 * 60, dtype=np.float32), vad, max_segment_duration=8.0
+        )
         assert len(result) > 1
         for earlier, later in pairwise(result):
             assert later["start"] >= earlier["end"] - 1e-6
@@ -798,7 +793,7 @@ class TestGetSpeechSegments:
         vad = [(float(i), i + 0.9) for i in range(40)]
         for cap in (5.0, 8.0, 10.0, 15.0):
             result = self._run(
-                torch.zeros(1, 16000 * 40), vad, max_segment_duration=cap
+                np.zeros(16000 * 40, dtype=np.float32), vad, max_segment_duration=cap
             )
             for earlier, later in pairwise(result):
                 assert later["start"] >= earlier["end"] - 1e-6, f"overlap at cap={cap}"
@@ -868,8 +863,9 @@ class TestLoadAndPreprocessAudio:
     @pytest.mark.parametrize("filename", ["sample_10s.wav", "sample_10s_video.mp4"])
     def test_loads_real_audio(self, filename: str) -> None:
         wav = load_and_preprocess_audio(make_upload(AUDIO_DIR / filename))
-        assert wav.shape[0] == 1
-        assert wav.shape[1] > 0
+        assert wav.ndim == 1
+        assert wav.dtype == np.float32
+        assert wav.shape[0] > 0
 
     def test_zero_sample_audio_raises_a_readable_error(self) -> None:
         # Caught at load, not downstream: an empty waveform passes VAD (which
@@ -877,7 +873,10 @@ class TestLoadAndPreprocessAudio:
         # mlx_audio's compute_features as a ValueError, which main() shows as
         # an st.exception traceback rather than the one-line st.error.
         with (
-            patch("streamlit_app._decode_audio", return_value=torch.zeros(1, 0)),
+            patch(
+                "streamlit_app._decode_audio",
+                return_value=np.zeros(0, dtype=np.float32),
+            ),
             pytest.raises(RuntimeError, match="No audio detected"),
         ):
             load_and_preprocess_audio(make_upload(AUDIO_DIR / "sample_10s.wav"))
@@ -906,7 +905,7 @@ class TestLoadAndPreprocessAudio:
         samples = MIN_AUDIO_SAMPLES * rate // SAMPLE_RATE
         raw = pcm_wav(np.zeros((1, samples)), rate)
         wav = load_and_preprocess_audio(make_upload(raw=raw, name="floor.wav"))
-        assert wav.shape == (1, MIN_AUDIO_SAMPLES)
+        assert wav.shape == (MIN_AUDIO_SAMPLES,)
 
     def test_invalid_audio_raises_runtime_error(self) -> None:
         with pytest.raises(RuntimeError, match="Failed to load audio file"):
@@ -925,10 +924,10 @@ class TestLoadAndPreprocessAudio:
         # scaling torchaudio applied, so the switch of decoder moved nothing.
         with wave.open(str(AUDIO_DIR / "sample_10s.wav")) as w:
             raw = w.readframes(w.getnframes())
-        expected = torch.frombuffer(bytearray(raw), dtype=torch.int16).float() / 32768
+        expected = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768
         wav = load_and_preprocess_audio(make_upload(AUDIO_DIR / "sample_10s.wav"))
-        assert wav.shape == (1, len(expected))
-        assert torch.equal(wav[0], expected)
+        assert wav.shape == expected.shape
+        assert np.array_equal(wav, expected)
 
     def test_latin1_tags_do_not_block_decoding(self) -> None:
         # The audio payload is untouched by the tag encoding, so the file must
@@ -936,11 +935,11 @@ class TestLoadAndPreprocessAudio:
         wav = load_and_preprocess_audio(
             make_upload(raw=latin1_tagged_wav(), name="t.wav")
         )
-        assert wav.shape == (1, 16000)
+        assert wav.shape == (16000,)
 
     def test_picks_the_default_track_not_the_first(self) -> None:
         # Two seconds of the default stereo track, not one of the mono.
-        assert _decode_audio(two_track_mkv()).shape == (1, 32000)
+        assert _decode_audio(two_track_mkv()).shape == (32000,)
 
     def test_codec_without_decoder_raises_readable_error(self) -> None:
         with pytest.raises(RuntimeError, match="no decoder is available"):
@@ -955,8 +954,8 @@ class TestLoadAndPreprocessAudio:
         raw = pcm_wav(np.stack([np.full(n, 0.5), np.zeros(n)]), rate)
         wav = load_and_preprocess_audio(make_upload(raw=raw, name="s.wav"))
         # Away from the edges, where the resample filter rings at 48 kHz.
-        middle = wav[0, 400:-400]
-        assert torch.allclose(middle, torch.full_like(middle, 0.25), atol=1e-3)
+        middle = wav[400:-400]
+        assert np.allclose(middle, 0.25, atol=1e-3)
 
     @pytest.mark.parametrize("rate", [48000, 44100, 22050, 8000])
     def test_resamples_to_the_model_rate(self, rate: int) -> None:
@@ -964,8 +963,8 @@ class TestLoadAndPreprocessAudio:
         # keeps its frequency and the mean's half amplitude: 0.25 at 440 Hz,
         # 0.125 at 1000 Hz. One second at 16 kHz gives 1 Hz FFT bins.
         wav = load_and_preprocess_audio(make_upload(raw=tones_wav(rate), name="t.wav"))
-        assert wav.shape == (1, SAMPLE_RATE)
-        spectrum = np.abs(np.fft.rfft(wav[0].numpy())) * 2 / SAMPLE_RATE
+        assert wav.shape == (SAMPLE_RATE,)
+        spectrum = np.abs(np.fft.rfft(wav)) * 2 / SAMPLE_RATE
         assert spectrum[440] == pytest.approx(0.25, abs=0.005)
         assert spectrum[1000] == pytest.approx(0.125, abs=0.005)
         spectrum[[440, 1000]] = 0
@@ -1087,26 +1086,24 @@ class TestLoadVadModel:
         mock_load.assert_called_once_with(MLX_VAD_REPO, revision=MLX_VAD_REVISION)
         assert result is mock_load.return_value
 
-    @patch("streamlit_app._torch_vad_model")
     @patch("streamlit_app._load_mlx_vad_model", side_effect=OSError("offline"))
-    def test_falls_back_when_the_repo_will_not_load(
-        self, _mock_mlx: MagicMock, mock_torch: MagicMock
+    def test_a_repo_that_will_not_load_is_a_readable_error(
+        self, _mock_mlx: MagicMock
     ) -> None:
-        with pytest.warns(RuntimeWarning, match="using the PyTorch VAD"):
-            result = _load_vad_model()
-        assert result is mock_torch.return_value
+        # A RuntimeError is what main() shows as one line, and the message
+        # names the way out: VAD off needs no VAD model.
+        with pytest.raises(RuntimeError, match="Turn off VAD segmentation"):
+            _load_vad_model()
 
-    @patch("streamlit_app._torch_vad_model")
     @patch("streamlit_app._load_mlx_vad_model")
-    def test_falls_back_when_the_internals_have_moved(
-        self, mock_mlx: MagicMock, mock_torch: MagicMock
-    ) -> None:
-        # A rename upstream must degrade to the slower-but-correct path, not
-        # surface as a crash on the first pipeline run.
+    def test_warns_when_the_internals_have_moved(self, mock_mlx: MagicMock) -> None:
+        # A rename upstream must degrade to the slower-but-correct streaming
+        # path, not surface as a crash on the first pipeline run — and not
+        # silently, since it is ~5x slower.
         mock_mlx.return_value = make_mlx_vad_model(drop="_probs_to_timestamps")
         with pytest.warns(RuntimeWarning, match="internals have moved"):
             result = _load_vad_model()
-        assert result is mock_torch.return_value
+        assert result is mock_mlx.return_value
 
 
 # ---------------------------------------------------------------------------
@@ -1118,18 +1115,18 @@ class TestTranscribeAudio:
     def test_returns_the_generated_text(self) -> None:
         model = MagicMock(spec=["generate"])
         model.generate.return_value = MagicMock(text="transcribed text")
-        assert transcribe_audio(torch.zeros(1, 16000), model) == "transcribed text"
+        assert (
+            transcribe_audio(np.zeros(16000, dtype=np.float32), model)
+            == "transcribed text"
+        )
 
-    def test_audio_is_the_squeezed_waveform_as_numpy(self) -> None:
+    def test_audio_is_the_waveform_itself(self) -> None:
+        # mlx_audio takes a 1-D numpy array, which is the waveform's own type.
         model = MagicMock(spec=["generate"])
         model.generate.return_value = MagicMock(text="text")
-        wav = torch.randn(1, 16000)
+        wav = np.random.default_rng(0).standard_normal(16000).astype(np.float32)
         transcribe_audio(wav, model)
-        audio = model.generate.call_args.kwargs["audio"]
-        # mlx_audio takes a 1-D numpy array, not a (1, N) torch tensor.
-        assert isinstance(audio, np.ndarray)
-        assert audio.shape == (16000,)
-        assert np.array_equal(audio, wav.squeeze().numpy())
+        assert model.generate.call_args.kwargs["audio"] is wav
 
     def test_passes_nothing_but_the_audio(self) -> None:
         # Greedy CTC takes no prompt and has no token budget. generate()'s
@@ -1137,7 +1134,7 @@ class TestTranscribeAudio:
         # so the exact kwargs set is pinned here: `audio` and nothing else.
         model = MagicMock(spec=["generate"])
         model.generate.return_value = MagicMock(text="text")
-        transcribe_audio(torch.zeros(1, 16000), model)
+        transcribe_audio(np.zeros(16000, dtype=np.float32), model)
         model.generate.assert_called_once()
         assert model.generate.call_args.args == ()
         assert set(model.generate.call_args.kwargs) == {"audio"}
@@ -1162,7 +1159,7 @@ class TestRunPipeline:
     ) -> None:
         # A single PipelineResult: with the one-model, one-language pipeline
         # there is nothing to key by, so the exact key set is the TypedDict's.
-        result = run_pipeline(torch.zeros(1, 160000), *pipeline_mocks)
+        result = run_pipeline(np.zeros(160000, dtype=np.float32), *pipeline_mocks)
         assert set(result) == {"transcript", "segments"}
 
     def test_segments_carry_the_untimestamped_text(
@@ -1175,14 +1172,14 @@ class TestRunPipeline:
             MagicMock(text="second"),
         ]
         with patch("streamlit_app.get_speech_segments", return_value=SEGMENTS_3S):
-            result = run_pipeline(torch.zeros(1, 48000), *pipeline_mocks)
+            result = run_pipeline(np.zeros(48000, dtype=np.float32), *pipeline_mocks)
         assert result["segments"] == [
             {"start": 0.0, "end": 1.5, "text": "first"},
             {"start": 1.5, "end": 3.0, "text": "second"},
         ]
 
     def test_single_segment_line_format(self, pipeline_mocks: PipelineMocks) -> None:
-        result = run_pipeline(torch.zeros(1, 160000), *pipeline_mocks)
+        result = run_pipeline(np.zeros(160000, dtype=np.float32), *pipeline_mocks)
         assert result["transcript"] == "[0:00 - 0:09] decoded text"
 
     def test_multi_segment_lines_are_timestamped_and_newline_joined(
@@ -1193,14 +1190,14 @@ class TestRunPipeline:
             MagicMock(text="second"),
         ]
         with patch("streamlit_app.get_speech_segments", return_value=SEGMENTS_3S):
-            result = run_pipeline(torch.zeros(1, 48000), *pipeline_mocks)
+            result = run_pipeline(np.zeros(48000, dtype=np.float32), *pipeline_mocks)
         assert result["transcript"] == "[0:00 - 0:01] first\n[0:01 - 0:03] second"
 
     def test_one_inference_per_segment_on_that_segment_slice(
         self, pipeline_mocks: PipelineMocks
     ) -> None:
         with patch("streamlit_app.get_speech_segments", return_value=SEGMENTS_3S):
-            run_pipeline(torch.zeros(1, 48000), *pipeline_mocks)
+            run_pipeline(np.zeros(48000, dtype=np.float32), *pipeline_mocks)
         calls = pipeline_mocks.model.generate.call_args_list
         # 1.5s slices at 16 kHz, one call per segment: the encoder pass is the
         # whole call, so there is nothing to share between segments.
@@ -1209,7 +1206,7 @@ class TestRunPipeline:
     def test_segmentation_on_passes_the_vad_model_to_the_segmenter(
         self, pipeline_mocks: PipelineMocks
     ) -> None:
-        wav = torch.zeros(1, 160000)
+        wav = np.zeros(160000, dtype=np.float32)
         with patch(
             "streamlit_app.get_speech_segments", return_value=SEGMENT_9S
         ) as mock_segments:
@@ -1221,7 +1218,7 @@ class TestRunPipeline:
     ) -> None:
         with pytest.raises(AssertionError, match="vad_model required"):
             run_pipeline(
-                torch.zeros(1, 160000),
+                np.zeros(160000, dtype=np.float32),
                 pipeline_mocks.model,
                 None,
                 use_segmentation=True,
@@ -1230,7 +1227,7 @@ class TestRunPipeline:
     def test_segmentation_off_skips_vad(self, pipeline_mocks: PipelineMocks) -> None:
         with patch("streamlit_app.get_speech_segments") as mock_vad:
             run_pipeline(
-                torch.zeros(1, 16000),
+                np.zeros(16000, dtype=np.float32),
                 pipeline_mocks.model,
                 None,
                 use_segmentation=False,
@@ -1251,7 +1248,7 @@ class TestRunPipeline:
         self, pipeline_mocks: PipelineMocks, samples: int
     ) -> None:
         result = run_pipeline(
-            torch.zeros(1, samples),
+            np.zeros(samples, dtype=np.float32),
             pipeline_mocks.model,
             None,
             use_segmentation=False,
@@ -1288,7 +1285,7 @@ class TestRunPipeline:
         # 160000 samples covers both fixtures (SEGMENT_9S ends at 144000).
         with patch("streamlit_app.get_speech_segments", return_value=segments):
             run_pipeline(
-                torch.zeros(1, 160000),
+                np.zeros(160000, dtype=np.float32),
                 *pipeline_mocks,
                 on_progress=lambda i, total, label: calls.append((i, total, label)),
             )

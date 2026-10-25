@@ -85,7 +85,7 @@ def plain_text(transcript: str) -> str:
 
 
 def transcribe(excerpts: list[dict]) -> None:
-    # Imported here so `fetch` and the label tooling never pay for torch/MLX.
+    # Imported here so `fetch` and the label tooling never pay for MLX.
     import mlx.core as mx
 
     import streamlit_app as app

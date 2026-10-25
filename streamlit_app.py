@@ -27,8 +27,8 @@ from typing import Any, NamedTuple, TypedDict
 
 import av
 import mlx.core as mx
+import numpy as np
 import streamlit as st
-import torch
 from huggingface_hub import try_to_load_from_cache
 from huggingface_hub.constants import HF_HUB_CACHE
 from huggingface_hub.errors import LocalEntryNotFoundError
@@ -43,7 +43,6 @@ from mlx_lm.models.cache import (
     trim_prompt_cache,
 )
 from mlx_lm.sample_utils import make_sampler
-from silero_vad import get_speech_timestamps, load_silero_vad
 from streamlit.runtime.uploaded_file_manager import UploadedFile
 
 # Encoder-only, English-only, greedy CTC: no prompt, no decoder, no
@@ -56,10 +55,9 @@ MODEL_ID = "ibm-granite/granite-speech-5.0-470m-turboctc"
 # would decode without complaint into different transcripts on the next cold
 # cache. The hash is what makes a transcript reproducible.
 MODEL_REVISION = "286456107c8ba1161f5c22dfe85466402c88333b"
-# Silero VAD v6 in MLX form. Its 16 kHz weights are bit-exact with the
-# `silero-vad` PyPI checkpoint the PyTorch fallback loads, so the two backends
-# agree by construction rather than by luck — which is exactly what the pin
-# below protects.
+# Silero VAD v6 in MLX form, the only VAD backend. Its 16 kHz weights are
+# bit-exact with the `silero-vad` PyPI 6.2.1 checkpoint (MIT), which is what the
+# pin below protects. It ships no 8 kHz weights, so the app's VAD is 16 kHz only.
 MLX_VAD_REPO = "mlx-community/silero-vad-v6"
 # Pinned for a different reason than MODEL_REVISION, which guards against a
 # personal account re-uploading. This repo is org-maintained, but mlx_audio's
@@ -131,7 +129,8 @@ MLX_CACHE_LIMIT_BYTES = 1 << 30
 # second of audio. That series is MLX alone: the Streamlit process also
 # holds the PyAV decode at the *source* rate and channel count (a 48 kHz
 # stereo hour is ~1.4 GB float32 before the mono and 16 kHz copies), the
-# upload bytes and the torch baseline, so an hour would land past 10 GB
+# upload bytes and (when measured) the since-removed torch baseline, so an
+# hour would land past 10 GB
 # in-process. 30 minutes keeps the whole process around 7 GB on a 16 GB
 # Mac; with VAD on there is no such ceiling at all. Both process figures
 # include the since-removed guardian (125M fp32 parameters, ~500 MB; the
@@ -393,8 +392,9 @@ def _supports_mlx_vad(model: Any) -> bool:
     """Probe the mlx_audio surface the batched VAD path reaches into.
 
     The fast path drives the branch submodules directly and borrows the
-    private _probs_to_timestamps, so a rename upstream must degrade to the
-    PyTorch reference rather than crash the run. This is the only place the
+    private _probs_to_timestamps, so a rename upstream must degrade to
+    mlx_audio's own public get_speech_timestamps — the same weights, streamed
+    chunk by chunk — rather than crash the run. This is the only place the
     app still reaches into mlx_audio internals — the speech model is driven
     through its public generate() alone.
 
@@ -459,13 +459,15 @@ def _mlx_vad_probabilities(model: Any, audio: mx.array) -> mx.array:
     stepping chunk by chunk exactly. Net effect: one model call per 32 ms of
     audio becomes one per ~65s.
 
-    Measured 2.9-3.5x faster than the PyTorch path across 10s-15min of audio,
-    and identical where it counts: max |delta p| of 2.5e-06 over 9375 chunks,
+    Measured 2.9-3.5x faster than the PyTorch build of the same checkpoint
+    (the fallback until torch was dropped) across 10s-15min of audio, and
+    identical where it counts: max |delta p| of 2.5e-06 over 9375 chunks,
     zero decisions flipped at the threshold, byte-identical spans out.
 
-    mlx_audio's own get_speech_timestamps is *slower* than PyTorch here (0.66x),
-    which is the whole reason this exists: at 309K parameters the per-call
-    dispatch cost dominates the arithmetic, so call count is the only lever.
+    mlx_audio's own get_speech_timestamps, now the fallback, is slower still
+    (0.66x PyTorch), which is the whole reason this exists: at 309K parameters
+    the per-call dispatch cost dominates the arithmetic, so call count is the
+    only lever.
     """
     branch = model.vad_16k
     windows = _mlx_vad_windows(audio)
@@ -490,7 +492,7 @@ def _mlx_vad_probabilities(model: Any, audio: mx.array) -> mx.array:
             # only while the conv stack collapses each window to a single frame.
             # Different STFT framing leaves more (hop_length=64 gives 2), and
             # taking frame 0 would silently drop the rest while the reference
-            # averages them. Refuse, and let the caller fall back to PyTorch.
+            # averages them. Refuse, and let the caller fall back to streaming.
             raise ValueError(
                 f"VAD encoder produced {x.shape[1]} frames per chunk, expected 1"
             )
@@ -504,89 +506,68 @@ def _mlx_vad_probabilities(model: Any, audio: mx.array) -> mx.array:
 
 
 def _spans_in_seconds(
-    speech_timestamps: list[dict[str, int]], sample_rate: int
+    speech_timestamps: list[dict[str, int]],
 ) -> list[tuple[float, float]]:
-    """Shared sample-offset -> seconds tail for both backends.
+    """Shared sample-offset -> seconds tail for both paths.
 
     The two paths are interchangeable only if they convert identically, so this
     is one function rather than two copies that could drift apart.
     """
     return [
-        (ts["start"] / sample_rate, ts["end"] / sample_rate) for ts in speech_timestamps
+        (ts["start"] / SAMPLE_RATE, ts["end"] / SAMPLE_RATE) for ts in speech_timestamps
     ]
 
 
-def _mlx_vad_spans(
-    wav: torch.Tensor, model: Any, sample_rate: int
-) -> list[tuple[float, float]]:
+def _mlx_vad_spans(wav: np.ndarray, model: Any) -> list[tuple[float, float]]:
     # Model.__call__ casts every input to model.dtype; this path bypasses it by
     # driving the branch directly, so do the cast here — MLX would otherwise
     # silently promote float32 audio against a float16 checkpoint and diverge
     # from the reference it claims to reproduce.
-    audio = mx.array(wav.detach().reshape(-1).to(torch.float32).numpy()).astype(
-        model.dtype
-    )
+    audio = mx.array(wav).astype(model.dtype)
     probabilities = _mlx_vad_probabilities(model, audio)
     mx.eval(probabilities)
     speech_timestamps = model._probs_to_timestamps(
         probabilities,
         audio_len=audio.shape[-1],
-        sample_rate=sample_rate,
+        sample_rate=SAMPLE_RATE,
         threshold=model.config.threshold,
         min_speech_duration_ms=model.config.min_speech_duration_ms,
         min_silence_duration_ms=model.config.min_silence_duration_ms,
         speech_pad_ms=model.config.speech_pad_ms,
         return_seconds=False,
     )
-    return _spans_in_seconds(speech_timestamps, sample_rate)
+    return _spans_in_seconds(speech_timestamps)
 
 
-def _torch_vad_spans(
-    wav: torch.Tensor, model: torch.nn.Module, sample_rate: int
-) -> list[tuple[float, float]]:
-    speech_timestamps = get_speech_timestamps(
-        wav.squeeze(), model, sampling_rate=sample_rate
-    )
-    return _spans_in_seconds(speech_timestamps, sample_rate)
+def _streaming_vad_spans(wav: np.ndarray, model: Any) -> list[tuple[float, float]]:
+    """mlx_audio's public path: the same weights, one model call per chunk."""
+    return _spans_in_seconds(model.get_speech_timestamps(wav, sample_rate=SAMPLE_RATE))
 
 
-@st.cache_resource(show_spinner=False)
-def _torch_vad_model() -> torch.nn.Module:
-    """Cached PyTorch VAD, shared by every fallback site.
+def silero_vad(wav: np.ndarray, model: Any) -> list[tuple[float, float]]:
+    """Speech spans in seconds, at SAMPLE_RATE only.
 
-    load_silero_vad() is not memoised — it re-runs torch.jit.load on each call —
-    so calling it inline would re-deserialise the model on every pipeline run of
-    a session that permanently falls back, and leave a second copy resident
-    alongside whatever load_vad_model already cached.
+    There is no sample_rate parameter on purpose: the v6 conversion ships no
+    8 kHz weights, but mlx_audio builds that branch regardless and loads
+    non-strictly, so running it would use randomly initialised layers and
+    return confident nonsense instead of failing.
     """
-    return load_silero_vad()
-
-
-def silero_vad(
-    wav: torch.Tensor, model: Any, sample_rate: int = SAMPLE_RATE
-) -> list[tuple[float, float]]:
-    if isinstance(model, torch.nn.Module):
-        return _torch_vad_spans(wav, model, sample_rate)
-    # The v6 conversion ships no 8 kHz weights, but mlx_audio builds that branch
-    # regardless and loads non-strictly, so calling it at 8 kHz runs randomly
-    # initialised layers and returns confident nonsense instead of failing.
-    # Anything but 16 kHz goes to the PyTorch model, which carries both branches.
-    if sample_rate != SAMPLE_RATE:
-        return _torch_vad_spans(wav, _torch_vad_model(), sample_rate)
-    try:
-        return _mlx_vad_spans(wav, model, sample_rate)
-    except Exception as e:  # noqa: BLE001 - any drift falls back to PyTorch
-        # hasattr only catches renames. A changed signature or return shape gets
-        # here instead, and would otherwise kill the run outright; warn so a
-        # silent 3x slowdown does not become an undiagnosable mystery.
-        warnings.warn(
-            f"MLX VAD failed ({type(e).__name__}: {e}); falling back to the "
-            "slower PyTorch model. mlx_audio's VAD internals have probably "
-            "changed.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return _torch_vad_spans(wav, _torch_vad_model(), sample_rate)
+    if _supports_mlx_vad(model):
+        try:
+            return _mlx_vad_spans(wav, model)
+        except Exception as e:  # noqa: BLE001 - any drift falls back to streaming
+            # hasattr only catches renames. A changed signature or return shape
+            # gets here instead, and would otherwise kill the run outright; warn
+            # so a silent ~5x slowdown does not become an undiagnosable mystery.
+            warnings.warn(
+                f"MLX VAD failed ({type(e).__name__}: {e}); falling back to "
+                "mlx_audio's slower streaming VAD. Its internals have probably "
+                "changed.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+    # A model the probe rejected was already warned about by load_vad_model.
+    return _streaming_vad_spans(wav, model)
 
 
 def _split_long_segment(
@@ -622,13 +603,12 @@ def _split_long_segment(
 
 
 def get_speech_segments(
-    wav: torch.Tensor,
+    wav: np.ndarray,
     model: Any,
-    sample_rate: int = SAMPLE_RATE,
     max_segment_duration: float = MAX_SEGMENT_DURATION_S,
 ) -> list[dict[str, float]]:
-    duration = wav.shape[-1] / sample_rate
-    vad_segments = silero_vad(wav, model, sample_rate)
+    duration = wav.shape[-1] / SAMPLE_RATE
+    vad_segments = silero_vad(wav, model)
     if not vad_segments:
         return _split_long_segment(0.0, duration, max_segment_duration)
     start_buffer = 0.3
@@ -725,8 +705,8 @@ def _best_audio_stream(
     return stream if isinstance(stream, av.AudioStream) else None
 
 
-def _decode_audio(data: bytes) -> torch.Tensor:
-    """Decode a container's best audio stream to (1, samples) float32 mono at
+def _decode_audio(data: bytes) -> np.ndarray:
+    """Decode a container's best audio stream to 1-D float32 mono at
     SAMPLE_RATE, via PyAV.
 
     PyAV is the decoder because its wheels *bundle* FFmpeg. torchaudio's own
@@ -770,7 +750,7 @@ def _decode_audio(data: bytes) -> torch.Tensor:
         # the frames rather than the stream header: HE-AAC with implicit SBR
         # declares half the rate its frames carry.
         to_model_rate: av.AudioResampler | None = None
-        chunks: list[torch.Tensor] = []
+        chunks: list[np.ndarray] = []
         for frame in container.decode(stream):
             if to_model_rate is None:
                 to_model_rate = av.AudioResampler(
@@ -780,15 +760,16 @@ def _decode_audio(data: bytes) -> torch.Tensor:
         if to_model_rate is not None:
             chunks.extend(_mono(c) for c in to_model_rate.resample(None))
     if not chunks:
-        return torch.zeros(1, 0)
-    return torch.cat(chunks, dim=1)
+        return np.zeros(0, dtype=np.float32)
+    return np.concatenate(chunks)
 
 
-def _mono(frame: av.AudioFrame) -> torch.Tensor:
-    return torch.from_numpy(frame.to_ndarray()).mean(dim=0, keepdim=True)
+def _mono(frame: av.AudioFrame) -> np.ndarray:
+    # fltp is (channels, samples) float32, and a float32 mean stays float32.
+    return frame.to_ndarray().mean(axis=0)
 
 
-def load_and_preprocess_audio(audio_file: UploadedFile) -> torch.Tensor:
+def load_and_preprocess_audio(audio_file: UploadedFile) -> np.ndarray:
     try:
         wav = _decode_audio(audio_file.getvalue())
     except Exception as e:
@@ -800,7 +781,7 @@ def load_and_preprocess_audio(audio_file: UploadedFile) -> torch.Tensor:
     # one 10 ms frame"), which main() surfaces as an st.exception traceback
     # where a RuntimeError gets the one-line st.error. Its own message rather
     # than the length floor's, since nothing decoded is not a short clip.
-    if wav.numel() == 0:
+    if wav.size == 0:
         raise RuntimeError("No audio detected: the file decoded to zero samples.")
     # In the model's samples, since the decode already resampled: 3000 samples
     # at 48 kHz is 1000 here.
@@ -840,34 +821,33 @@ def audio_duration_seconds(audio_file: UploadedFile) -> float | None:
 
 @st.cache_resource(show_spinner=False)
 def load_vad_model() -> Any:
-    """Load the MLX Silero VAD v6 model, degrading to the PyTorch build.
+    """Load the MLX Silero VAD v6 model.
 
-    Two ways the fast path can be unavailable, and both land on the same
-    fallback: the repo may not resolve at all (offline, or renamed), or it may
-    load into a class whose internals have moved. Warn in either case — the
-    PyTorch path is correct but ~3x slower, and a silent downgrade would be
-    invisible until someone benchmarked it.
+    A repo that does not resolve (offline, renamed) is a RuntimeError, which
+    main() shows as one line; turning VAD off transcribes without it. There
+    is no second backend to load instead: the PyTorch build went with torch,
+    and a first run needs the network for the speech model anyway. A model
+    whose internals have moved still loads, and silero_vad() runs it through
+    mlx_audio's public streaming path — warned here, since that is ~5x slower
+    and a silent downgrade would be invisible until someone benchmarked it.
     """
     try:
         model = _load_mlx_vad_model(MLX_VAD_REPO, revision=MLX_VAD_REVISION)
-    except Exception as e:  # noqa: BLE001 - any load failure falls back
-        warnings.warn(
-            f"Could not load {MLX_VAD_REPO} ({e}); using the PyTorch VAD.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return _torch_vad_model()
+    except Exception as e:
+        raise RuntimeError(
+            f"Could not load the VAD model {MLX_VAD_REPO} ({e}). "
+            "Turn off VAD segmentation to transcribe without it."
+        ) from e
     if not _supports_mlx_vad(model):
         warnings.warn(
-            "mlx_audio's VAD internals have moved; using the PyTorch VAD.",
+            "mlx_audio's VAD internals have moved; using its slower streaming VAD.",
             RuntimeWarning,
             stacklevel=2,
         )
-        return _torch_vad_model()
     return model
 
 
-def transcribe_audio(wav: torch.Tensor, model: Any) -> str:
+def transcribe_audio(wav: np.ndarray, model: Any) -> str:
     """One encoder pass and a greedy CTC collapse over a waveform slice.
 
     There is no prompt, no token budget and no autoregressive loop: generate()
@@ -877,11 +857,11 @@ def transcribe_audio(wav: torch.Tensor, model: Any) -> str:
     here the encode *is* the whole call. Output is lowercase and unpunctuated,
     the way the model's training transcripts were normalised.
     """
-    return model.generate(audio=wav.squeeze().numpy()).text
+    return model.generate(audio=wav).text
 
 
 def run_pipeline(
-    wav: torch.Tensor,
+    wav: np.ndarray,
     model: Any,
     vad_model: Any = None,
     on_progress: Callable[[int, int, str], None] | None = None,
@@ -905,7 +885,7 @@ def run_pipeline(
         # sample for ~0.6% of clip lengths (2002, 2006, ...).
         start_sample = round(seg["start"] * SAMPLE_RATE)
         end_sample = round(seg["end"] * SAMPLE_RATE)
-        text = transcribe_audio(wav[:, start_sample:end_sample], model)
+        text = transcribe_audio(wav[start_sample:end_sample], model)
         ts_start = format_timestamp(seg["start"])
         ts_end = format_timestamp(seg["end"])
         lines.append(f"[{ts_start} - {ts_end}] {text}")
