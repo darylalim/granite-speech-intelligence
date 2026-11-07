@@ -100,11 +100,15 @@ Playwright (Python) runs in a scratchpad venv, never `uv add`, with Chrome as th
 
 - **App:** a fresh `uv run streamlit run streamlit_app.py` on a fixed port. **Warm it first:** one full transcribe and analyse in a throwaway browser context, so both models are in `@st.cache_resource` and the take shows warm timings, not a 4 GB download. Clear the toasts by reloading before the take.
 - **Viewport:** 1470×900 with the sidebar open (input / transcript columns ~388 / 590 px, measured). That keeps the two-column grid readable on a phone after cropping. Dark theme via `color_scheme="dark"`.
-- **Sharpness:** Playwright's built-in `record_video_dir` records at the viewport's CSS-pixel size and does not honour `device_scale_factor`, so text comes out soft. Before committing to a pipeline, do a 10 s test take both ways:
-  - (a) `record_video_dir` as is
-  - (b) a CDP `Page.startScreencast` at `device_scale_factor=2`, writing frames that are assembled afterwards
+- **Sharpness: frame-grab at DSF 2.** Decided 2026-11-07 by test takes of the transcript card landing, compared with the card zoomed to fill a 1080-wide 4:5 frame (×1.94 from CSS px):
+  - **(a) `record_video_dir`: rejected.** It records at CSS-pixel size (1470×900) whatever the `device_scale_factor`. Upscaled ×1.94 the text is visibly soft, and its low-bitrate VP8 (0.4 MB for ~8 s) adds ringing around the letters. It also needs Playwright's own `ffmpeg` download (`playwright install ffmpeg`).
+  - **(b) CDP `Page.startScreencast`: rejected.** Under DSF emulation it never sends a frame larger than the CSS viewport, headless or headed, even with `maxWidth`/`maxHeight` set to device size. A lossless 1470×900 frame upscaled ×1.94 is as soft as (a) without the ringing, so the problem is resolution, not compression.
+  - **(c) CDP `Page.captureScreenshot` in a timed loop: chosen.** It needs `clip: {x: 0, y: 0, width, height, scale: 2}`; without the clip it, too, returns CSS-size frames. It returns true 2940×1800 frames at a steady **20 fps** (50 ms each, i.e. three display refreshes; median gap 50 ms, max 78 ms, no failed captures). The frames are resampled to constant 30 fps and encoded with PyAV's bundled `libx264` (`crf 14`, `preset slow`, `tune stillimage`): 4.8 s came to 0.3 MB, and at the 4:5 zoom it can't be told apart from a lossless DSF 2 PNG. CSS size runs at 30–45 fps, which is the only reason to trade the resolution back.
 
-  Pick (b) only if (a) is visibly soft at the post's final size.
+  Mechanics that matter:
+  - The capture loop and the shot run together on Playwright's **async** API; the sync API can't capture while it clicks.
+  - Start capturing only after the app has loaded. Capturing during `page.goto` fails with "Not attached to an active page".
+  - 20 fps is enough for a UI that mostly holds still. The zooms and pans are keyframed in the editor from the 2940×1800 master, so they move at the export's frame rate, not the capture's. The toast's slide-in and the progress bar are the only motion recorded at 20 fps.
 - **Pacing:** the script owns the timing. It waits on app state, not on sleeps: the card subheader, the toast text, the board caption. It then holds for a fixed beat (1–1.5 s) after each state so viewers can read. Use `locator.hover()` before clicks so the motion reads as a person's. Playwright draws no cursor, so either inject a small CSS cursor dot that follows `mousemove`, or accept no cursor and rely on zooms.
 - **File input:** `set_input_files` on the uploader's `input[type=file]`. A drag-and-drop animation isn't worth faking.
 - **Determinism:** greedy decoding in both models and a pinned revision of each. The same WAV should produce the same transcript, summary and board on every take, so a retake changes timing only. If a take differs in content, find out why before re-cutting.
@@ -126,8 +130,8 @@ Playwright (Python) runs in a scratchpad venv, never `uv add`, with Chrome as th
 ## Steps
 
 1. ~~Write and voice the meeting script, then tune it against the app until the board shows a spread (Demo audio).~~ **Done.**
-2. **Next:** do the sharpness test take, and choose `record_video_dir` or screencast (Capture).
-3. Write the capture script with state-based waits and the timestamp log. Do three takes and keep the cleanest.
+2. ~~Do the sharpness test take, and choose `record_video_dir` or screencast (Capture).~~ **Done:** neither; frame-grab at DSF 2.
+3. **Next:** write the capture script with state-based waits and the timestamp log. Do three takes and keep the cleanest.
 4. Write captions and check each one against "What the video must not claim".
 5. Cut the 16:9 version, then the 4:5 crop.
 6. Review on a phone, muted, before posting.
