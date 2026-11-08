@@ -11,6 +11,11 @@ Local English speech-to-text on Apple Silicon, all on MLX: IBM Granite Speech 5.
 </p>
 <p align="center"><em>Analysis and timestamped transcription of a one-minute synthesised team meeting, in dark mode.</em></p>
 
+<p align="center">
+  <a href="https://youtu.be/k6xRJ1E2Nbs"><img src="https://img.youtube.com/vi/k6xRJ1E2Nbs/maxresdefault.jpg" alt="Demo video on YouTube: the question board ranked by P(yes), beside the line &quot;Meeting in. Insights out.&quot;" width="50%"></a>
+</p>
+<p align="center"><em><a href="https://youtu.be/k6xRJ1E2Nbs">Watch the 71-second demo on YouTube</a>: upload, transcribe, analyse and export, in real time with no cuts.</em></p>
+
 ## Features
 
 - **Transcription** — English, with IBM Granite Speech 5.0 TurboCTC (470M, encoder-only, greedy CTC); output is lowercase and unpunctuated
