@@ -43,3 +43,9 @@ combine-as-imports = true
 
 [tool.ty.environment]
 python-version = "3.12"
+
+[tool.ty.src]
+# The demo's capture and cut run in an ephemeral `uv run --no-project --with`
+# environment (Playwright, Pillow) the project never declares; ruff still
+# lints and formats them. See docs/DEMO.md, Reproduce.
+exclude = ["docs/demo/capture_demo.py", "docs/demo/cut_demo.py"]

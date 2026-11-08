@@ -1,6 +1,6 @@
 # Demo video plan
 
-A 60–90 second video of the app for a social or portfolio post. The footage is captured by a Playwright script that drives the real app, so a retake is a re-run rather than a re-performance. The audio it transcribes is a scripted meeting synthesised with macOS `say`. This is a plan, not shipped code: nothing here changes `streamlit_app.py`, and the capture script lives in a scratchpad (see CLAUDE.md, Commands, Spikes) unless we decide to keep it.
+A 60–90 second video of the app for a social or portfolio post. The footage is captured by a Playwright script that drives the real app, so a retake is a re-run rather than a re-performance. The audio it transcribes is a scripted meeting synthesised with macOS `say`. Nothing here changes `streamlit_app.py`. The scripts that rebuild the video are in `docs/demo/` so it can be re-shot after a UI change; see Reproduce.
 
 ## The message
 
@@ -96,7 +96,7 @@ The shot-7 replacement, "Is a bug or problem discussed?", scores **1.00**.
 
 ## Capture
 
-Playwright (Python) runs in a scratchpad venv, never `uv add`, with Chrome as the browser, as in the A6 layout measurements.
+Playwright (Python) runs in an ephemeral `uv run --no-project --with` environment, never `uv add`, with the installed Chrome as the browser, as in the A6 layout measurements.
 
 - **App:** a fresh `uv run streamlit run streamlit_app.py --server.port 8599 --server.headless true --client.toolbarMode minimal`. The last flag removes the dev-mode "Deploy" button from the corner of every frame; it is a launch flag, so `.streamlit/config.toml` is unchanged. **Warm it first:** one full transcribe and analyse in a throwaway browser context, so both models are in `@st.cache_resource` and the take shows warm timings, not a 4 GB download. Clear the toasts by reloading before the take.
 - **Viewport:** 1470×900 with the sidebar open (input / transcript columns ~388 / 590 px, measured). That keeps the two-column grid readable on a phone after cropping. Dark theme via `color_scheme="dark"`.
@@ -113,7 +113,7 @@ Playwright (Python) runs in a scratchpad venv, never `uv add`, with Chrome as th
 - **File input:** `set_input_files` on the uploader's `input[type=file]`. A drag-and-drop animation isn't worth faking.
 - **Determinism:** greedy decoding in both models and a pinned revision of each. The same WAV should produce the same transcript, summary and board on every take, so a retake changes timing only. If a take differs in content, find out why before re-cutting.
 - **Output:** one continuous take per run, plus a JSON log of timestamps for each state change (upload, toggle, click, card, toast, board). The edit uses the log to place captions and zooms without scrubbing. Each event that a zoom targets also logs the element's box in CSS px (×2 for the master).
-- **The script, as built** (`capture_demo.py <take>`, scratchpad):
+- **The script, as built** (`docs/demo/capture_demo.py <take>`):
   - A ring cursor injected with `add_init_script`. It follows real `mousemove` events and shrinks on `mousedown`.
   - Mouse glides eased over ~0.7 s in real time; Playwright's own `steps=` fire as fast as they can, so the cursor would jump.
   - Wheel scrolling in 40 px steps, because `scroll_into_view_if_needed` jumps.
@@ -123,7 +123,7 @@ Playwright (Python) runs in a scratchpad venv, never `uv add`, with Chrome as th
 
 ## Edit and export
 
-**Done (2026-11-07), scripted rather than in an editor.** `cut_demo.py <take>` (scratchpad, PyAV + Pillow) renders both formats from `master.mp4` and `log.json` in ~2.5 minutes: `demo_16x9.mp4` (1920×1080, 70.9 s, 13.9 MB) and `demo_4x5.mp4` (1080×1350, 70.9 s, 11.2 MB). H.264 high profile, `crf 18`, `+faststart`, 30 fps, silent.
+**Done (2026-11-07), scripted rather than in an editor.** `docs/demo/cut_demo.py <take>` (PyAV + Pillow) renders both formats from `master.mp4` and `log.json` in ~2.5 minutes: `demo_16x9.mp4` (1920×1080, 70.9 s, 13.9 MB) and `demo_4x5.mp4` (1080×1350, 70.9 s, 11.2 MB). H.264 high profile, `crf 18`, `+faststart`, 30 fps, silent.
 
 - **Timeline:** the first frame is held 1 s under the title card. The take then runs **uncut at real speed** (0–63.9 s), which is what lets shot 3 say "Real time, no cuts". Then a 6 s end card, cross-faded in over 0.6 s.
 - **Camera:** per-format keyframes, eased over 0.9 s. Each keyframe is a fixed region or a box the capture logged (`"@board_in_view"`), so the framing follows wherever the capture scrolled. `fit()` makes the smallest window of the output's aspect that puts the region in the part of the frame *above* the caption (the top 83% in 16:9, 79% in 4:5), clamped to the page. Zoom is capped at ~1.2× upscaling from the DSF 2 master (minimum window 800 CSS px in 16:9, 520 in 4:5), so text stays sharp.
@@ -152,6 +152,35 @@ Playwright (Python) runs in a scratchpad venv, never `uv add`, with Chrome as th
 
 - **Length:** 70.9 s, inside 60–90 s, with nothing cut.
 
+## Reproduce
+
+Re-shoot after a UI change, from the repo root, on macOS with Google Chrome installed. Everything a run writes goes to `docs/demo/build/`, which `.gitignore`'s `build/` already covers. A take's frames are ~1.5 GB, and they are kept so a take can be re-cut without re-capturing.
+
+| File | What it is |
+|------|------------|
+| `meeting_script.txt` | The meeting, one `speaker\|line` per row: the source of truth for the audio |
+| `make_meeting.py` | Voices the script with `say`, writes `build/team_meeting.wav`; `--analyse` prints what the app makes of it |
+| `capture_demo.py` | Drives the app through shots 1–8 and writes `build/capture/take<N>/` |
+| `cut_demo.py` | Renders `demo_16x9.mp4` and `demo_4x5.mp4` from a take |
+
+```bash
+# 1. The audio, in the project venv. It imports the app, hence PYTHONPATH.
+PYTHONPATH=. uv run python docs/demo/make_meeting.py --analyse
+
+# 2. The app, in its own terminal.
+uv run streamlit run streamlit_app.py --server.port 8599 --server.headless true --client.toolbarMode minimal
+
+# 3. Capture, then cut, in an ephemeral environment pinned to the versions used here.
+W="uv run --no-project --with playwright==1.64.1 --with pillow==13.0.0 --with av==19.0.2"
+$W python docs/demo/capture_demo.py 1
+$W python docs/demo/cut_demo.py 1
+```
+
+- **Why two environments.** `make_meeting.py` uses the app's own decoder and pipeline, so it runs in the project venv and `ty` checks it. The capture and cut need Playwright and Pillow, which the app doesn't, so they get a throwaway environment instead of new project dependencies, and `pyproject.toml` excludes those two from `ty` (`[tool.ty.src]`). `ruff` and the CI format check still cover all three. An editor's ty language server doesn't read that exclusion and flags the Playwright import in `capture_demo.py`; `uv run ty check` passes.
+- **The font** is the Source Sans 3 WOFF2 inside the project's `.venv` (Streamlit's), so `uv sync` has to have run.
+- **Checked 2026-11-07:** from the repo, `make_meeting.py` reproduced the takes' WAV byte for byte, and one capture (63.5 s, 19.1 fps, no failed frames) cut to 70.5 s in both formats. The first capture attempt in the fresh pinned environment exited with an error its output filter hid (it matched `Error`, not uv's lowercase `error:`). An identical re-run went through, so a transient environment build is the likely cause, unconfirmed.
+- **When the UI changes:** a selector that no longer matches fails loudly (Capture, Selectors that held). A layout change can leave a fixed camera region in `cut_demo.py`'s `CAMERA` pointing at the wrong place, so compare a sheet of frames before posting. The regions taken from the log (`"@event"`) follow on their own.
+
 ## Steps
 
 1. ~~Write and voice the meeting script, then tune it against the app until the board shows a spread (Demo audio).~~ **Done.**
@@ -164,5 +193,5 @@ Playwright (Python) runs in a scratchpad venv, never `uv add`, with Chrome as th
 ## Open questions
 
 - Light or dark? The README screenshot is dark. Should a final shot flip the theme from the menu to show both?
-- Should the capture script and the WAV-building script be kept in the repo (e.g. under `docs/demo/`) so the video can be re-shot after a UI change, or thrown away after the cut? The meeting script itself now lives in this file. Keeping the code means it has to pass `ruff` and the CI format check, and the tuning scripts import `streamlit_app`, so they would need the repo root on `PYTHONPATH` (pytest's `pythonpath` setting doesn't apply to them).
+- ~~Should the scripts be kept in the repo?~~ **Yes:** `docs/demo/` (Reproduce).
 - Should the Record tab appear (a 2 s shot of the mic widget) even though the take uses an upload?

@@ -1,0 +1,10 @@
+A|Morning Tom. Quick question for you. Can we move the launch of the new dashboard to next week?
+B|We could, but the payment screen still fails on older phones. What would we gain?
+A|Time to fix that bug properly. The Brightpay team also wants a final review before we ship.
+B|Fair enough. Then let us go with the Thursday release, at ten in the morning.
+A|Agreed. One more question. What about the budget for extra testing?
+B|The test devices cost about two thousand dollars. I think that is reasonable.
+A|Good. Maya will own the rollout, and she will check the release notes with Brightpay on Wednesday.
+B|I will send the meeting notes tonight, and I will book the test devices tomorrow.
+A|Perfect. Is there anything else before we finish?
+B|No, that is everything. Thanks, see you on Thursday.
