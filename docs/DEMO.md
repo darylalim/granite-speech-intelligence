@@ -152,6 +152,21 @@ Playwright (Python) runs in an ephemeral `uv run --no-project --with` environmen
 
 - **Length:** 70.9 s, inside 60–90 s, with nothing cut.
 
+## YouTube
+
+**Published 2026-11-08: https://youtu.be/k6xRJ1E2Nbs**, public, on a channel that is dev-focused for now. It is the 16:9 cut with sound added, a custom thumbnail and chapters. The 4:5 cut stays silent for feeds that autoplay muted. A YouTube viewer usually has the sound on, and 71 silent seconds can read as broken audio.
+
+- **Sound** (`youtube_cut.py`): the video stream is copied, so the picture is bit-identical to the cut.
+  - **Music:** "Rain Over Kyoto Station" by The Mini Vandals, from the YouTube Audio Library, filtered to "attribution not required". It was chosen by listening to four test cuts (Circuit Rush, Balearic Slide and Pulsar were the others), each mixed the same way. It starts 30 s into the track, at −26 dBFS RMS, fades in over 1.5 s and fades out across the end card. Studio's copyright check passed it.
+  - **Speech:** "Morning Tom. Quick question for you." (the first 2.75 s of the meeting, ending on the pause at 3.13 s) plays when the audio player lands in shot 2, at 6.33 s, with the music ducked 12 dB. The shot-2 caption appears about 2 s before the file lands, so starting on the caption would have put the voice over an empty uploader.
+  - **Timing comes from the cut, not the log:** this cut outlived its take, so `log.json` was gone. The title fade marks the upload, and the player is the largest single-frame change in the input column, since the camera's zoom changes it a little on every frame.
+- **Chapters** (also printed by `youtube_cut.py`): 0:00 Upload and transcribe · 0:17 Turn on analysis · 0:30 Summary and question board · 0:41 Ask your own questions · 0:56 Export. They are read from when each burned-in caption appears. Shots are grouped because several run under YouTube's 10 s minimum per chapter.
+- **Thumbnail** (`youtube_thumbnail.py`): the question board at 39.0 s beside "Meeting in. Insights out." / "Runs on your Mac · Granite · MLX". The capture's cursor ring sits on the board in every frame of shot 6, so it is painted out with the same bar 80 px to its right. The first try, copying the row above, left a 1 px seam.
+- **Upload settings:** title "Meeting in, insights out: local speech AI on a Mac". The description is checked against "What the video must not claim": the first run downloads about 5 GB, the machine is the M2 Max, English only, scores rank rather than decide, and the meeting is labelled synthetic. Ten tags. Not made for kids, no paid promotion. AI use "No": the four cases YouTube lists are a real person made to say something, altered real footage, a realistic invented scene, and AI music as the focus. Text-to-speech voices that are no one, in a software demo, are none of them.
+- **Verification:** a custom thumbnail needs a phone-verified channel; before that, Studio drops the upload with no error. Clickable links in the description need YouTube's *advanced* features (a selfie video, ID, or about 2 months of channel history), so until then the repo URL shows as plain text.
+- **README:** a linked thumbnail from `img.youtube.com/vi/<id>/maxresdefault.jpg`, which YouTube serves as the custom thumbnail, so nothing is committed and a new thumbnail reaches the README without a commit.
+- **Checked:** both scripts were run against the published files. The thumbnail is pixel-identical. The video stream is bit-identical, and the speech time and chapters match. The audio matches to float32 rounding before encoding (max 6e-8). The AAC encoder is deterministic, and that rounding is what leaves a −63 dB residue between the two encodes, 37 dB under the music.
+
 ## Reproduce
 
 Re-shoot after a UI change, from the repo root, on macOS with Google Chrome installed. Everything a run writes goes to `docs/demo/build/`, which `.gitignore`'s `build/` already covers. A take's frames are ~1.5 GB, and they are kept so a take can be re-cut without re-capturing.
@@ -162,6 +177,8 @@ Re-shoot after a UI change, from the repo root, on macOS with Google Chrome inst
 | `make_meeting.py` | Voices the script with `say`, writes `build/team_meeting.wav`; `--analyse` prints what the app makes of it |
 | `capture_demo.py` | Drives the app through shots 1–8 and writes `build/capture/take<N>/` |
 | `cut_demo.py` | Renders `demo_16x9.mp4` and `demo_4x5.mp4` from a take |
+| `youtube_cut.py` | Adds the music and the meeting line to the 16:9 cut, and prints the chapters |
+| `youtube_thumbnail.py` | Makes the 1280×720 thumbnail from the 16:9 cut |
 
 ```bash
 # 1. The audio, in the project venv. It imports the app, hence PYTHONPATH.
@@ -174,9 +191,15 @@ uv run streamlit run streamlit_app.py --server.port 8599 --server.headless true 
 W="uv run --no-project --with playwright==1.64.1 --with pillow==13.0.0 --with av==19.0.2"
 $W python docs/demo/capture_demo.py 1
 $W python docs/demo/cut_demo.py 1
+
+# 4. YouTube: sound and chapters in the project venv, then the thumbnail.
+#    The music is the Audio Library download, which is not committed.
+T=docs/demo/build/capture/take1
+uv run python docs/demo/youtube_cut.py $T/demo_16x9.mp4 "Rain Over Kyoto Station - The Mini Vandals.mp3"
+$W python docs/demo/youtube_thumbnail.py $T/demo_16x9.mp4
 ```
 
-- **Why two environments.** `make_meeting.py` uses the app's own decoder and pipeline, so it runs in the project venv and `ty` checks it. The capture and cut need Playwright and Pillow, which the app doesn't, so they get a throwaway environment instead of new project dependencies, and `pyproject.toml` excludes those two from `ty` (`[tool.ty.src]`). `ruff` and the CI format check still cover all three. An editor's ty language server doesn't read that exclusion and flags the Playwright import in `capture_demo.py`; `uv run ty check` passes.
+- **Why two environments.** `make_meeting.py` uses the app's own decoder and pipeline, and `youtube_cut.py` needs only `av` and `numpy`, so both run in the project venv and `ty` checks them. The capture, the cut and the thumbnail need Playwright or Pillow, which the app doesn't, so they get a throwaway environment instead of new project dependencies, and `pyproject.toml` excludes those three from `ty` (`[tool.ty.src]`). `ruff` and the CI format check still cover all five. An editor's ty language server doesn't read that exclusion and flags the Playwright import in `capture_demo.py`; `uv run ty check` passes.
 - **The font** is the Source Sans 3 WOFF2 inside the project's `.venv` (Streamlit's), so `uv sync` has to have run.
 - **Checked 2026-11-07:** from the repo, `make_meeting.py` reproduced the takes' WAV byte for byte, and one capture (63.5 s, 19.1 fps, no failed frames) cut to 70.5 s in both formats. The first capture attempt in the fresh pinned environment exited with an error its output filter hid (it matched `Error`, not uv's lowercase `error:`). An identical re-run went through, so a transient environment build is the likely cause, unconfirmed.
 - **When the UI changes:** a selector that no longer matches fails loudly (Capture, Selectors that held). A layout change can leave a fixed camera region in `cut_demo.py`'s `CAMERA` pointing at the wrong place, so compare a sheet of frames before posting. The regions taken from the log (`"@event"`) follow on their own.
