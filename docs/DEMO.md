@@ -188,7 +188,7 @@ $W python docs/demo/cut_demo.py 1
 3. ~~Write the capture script with state-based waits and the timestamp log. Do three takes and keep the cleanest.~~ **Done.** Shots 3 and 4 were swapped after the first take (Storyboard).
 4. ~~Write captions and check each one against "What the video must not claim".~~ **Done** (Edit and export, Captions).
 5. ~~Cut the 16:9 version, then the 4:5 crop.~~ **Done**, from take 4.
-6. **Next:** review on a phone, muted, before posting. This one is by hand.
+6. ~~Review on a phone, muted, before posting.~~ **Done (2026-11-07):** the 4:5 cut on an iPhone, muted and upright; every caption, the transcript, the analysis card, the board and the end card's repo URL read without zooming, and shot 4's brief overlap was accepted.
 
 ## Open questions
 
