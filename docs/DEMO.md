@@ -119,11 +119,16 @@ Playwright (Python) runs in a scratchpad venv, never `uv add`, with Chrome as th
   - Wheel scrolling in 40 px steps, because `scroll_into_view_if_needed` jumps.
   - The question edit is a JS `setSelectionRange` over the old line, then typed at 45 ms a key, then committed with ⌘+Enter, which the text area's own hint shows on screen.
 - **Selectors that held** on Streamlit 1.66: keyed widgets through their `.st-key-<key>` class (`use_analysis`, `questions`, `transcribe`, `dl_md`, `dl_txt`); the visible uploader button as `[data-testid="stBaseButton-secondary"]` (`get_by_role("button")` also matches the hidden file input); a card as the innermost `stVerticalBlock` containing its heading (there is no `…BorderWrapper` test id any more); `.first` on the download buttons, where `.st-key-dl_md button` matches two.
-- **Takes, 2026-11-07:** three takes of 63.2–63.5 s, 18.6–18.9 fps, no failed captures, 6.9–7.2 MB each. Every event lands within 0.35 s across takes, and frames at the same event are pixel-identical apart from a toast mid-animation. So the takes are interchangeable; take 2 is the one to cut.
+- **Takes, 2026-11-07:** three takes of 63.2–63.5 s, 18.6–18.9 fps, no failed captures, 6.9–7.2 MB each. Every event lands within 0.35 s across takes, and frames at the same event are pixel-identical apart from a toast mid-animation. So the takes are interchangeable. **Take 4** (63.9 s, 19.4 fps) replaced them for the cut: the board and the edited questions box sat at the foot of the window (y ≈ 830 of 900), where no camera move could lift them clear of the caption. Take 4 wheel-scrolls each into the band above it (`scroll_band`, y 110–640): board 108–589, questions 141–351. The sidebar is fixed, so its toggles stay in view. The one exception is shot 4's questions box (621–831): the page has nothing to scroll until the analysis card exists.
 
 ## Edit and export
 
-- **Tool:** any editor that does keyframed crop/zoom and captions (Screen Studio, DaVinci Resolve or iMovie). The timestamp log drives the cut list.
+**Done (2026-11-07), scripted rather than in an editor.** `cut_demo.py <take>` (scratchpad, PyAV + Pillow) renders both formats from `master.mp4` and `log.json` in ~2.5 minutes: `demo_16x9.mp4` (1920×1080, 70.9 s, 13.9 MB) and `demo_4x5.mp4` (1080×1350, 70.9 s, 11.2 MB). H.264 high profile, `crf 18`, `+faststart`, 30 fps, silent.
+
+- **Timeline:** the first frame is held 1 s under the title card. The take then runs **uncut at real speed** (0–63.9 s), which is what lets shot 3 say "Real time, no cuts". Then a 6 s end card, cross-faded in over 0.6 s.
+- **Camera:** per-format keyframes, eased over 0.9 s. Each keyframe is a fixed region or a box the capture logged (`"@board_in_view"`), so the framing follows wherever the capture scrolled. `fit()` makes the smallest window of the output's aspect that puts the region in the part of the frame *above* the caption (the top 83% in 16:9, 79% in 4:5), clamped to the page. Zoom is capped at ~1.2× upscaling from the DSF 2 master (minimum window 800 CSS px in 16:9, 520 in 4:5), so text stays sharp.
+- **Type:** Source Sans 3, the app's own face (OFL), read from the WOFF2 that Streamlit bundles. Captions are Semibold on a square Gray 100 panel with a 6 px Blue 60 rule, the theme's tokens. The title card's size is computed so its widest line fits 86% of the frame; the first 4:5 render, sized from the frame, clipped both edges.
+- **Known overlap:** in the 4:5 cut at shot 4, the last two of the nine default questions sit under the caption for ~2.5 s (the page can't scroll there yet; see Capture, Takes).
 - **Formats:** 1920×1080 (16:9) for X, YouTube and portfolio sites, and a 1080×1350 (4:5) crop for LinkedIn and Instagram feeds. The 4:5 version leans on zooms (shots 5–6 especially), because the full grid at phone width is too small to read.
 - **Sound:** Playwright records no audio. Options:
   - silent with burned-in captions, which suits feeds that autoplay muted
@@ -131,17 +136,30 @@ Playwright (Python) runs in a scratchpad venv, never `uv add`, with Chrome as th
   - optionally, 2–3 s of the meeting audio under shot 2 so viewers hear what is being transcribed
 
   Captions are burned in either way.
-- **Captions:** high contrast, at least 4.5:1 against what they sit on (the theme was measured to that line; the video should keep it). Every caption is held on screen long enough to read twice.
-- **Length check:** if it runs over 90 s, cut shot 8 first, then shot 7.
+- **Captions:** high contrast, at least 4.5:1 against what they sit on (the theme was measured to that line; the video should keep it). Measured: Gray 10 on the panel 16.5:1, and 13.8:1 at worst (the 93%-opaque panel over white); muted end-card text 10.6:1. Every caption is held for its whole shot (4–16 s) with 0.25 s fades. As burned in, each checked against "What the video must not claim":
+
+| Shot | Caption | Check |
+|------|---------|-------|
+| 1 | "Meeting in. Transcript, summary and action items out." / "All on your Mac." | Local by design, and makes no offline claim (the first run downloads the models) |
+| 2 | "Upload audio or video, or record from the mic" | — |
+| 3 | "Speech to text with Granite Speech 5.0, on device. Real time, no cuts" | No speed figure: click to card is ~1.5 s on screen (rerun, decode and VAD as well as the model's 0.56 s), so "under a second" would be false. The uncut footage is the claim |
+| 4 | "Add analysis, and ask your own yes/no questions" | — |
+| 5 | "Summary and action items by Granite 4.2 3B, also on device" | — |
+| 6 | "Questions ranked by how likely the answer is yes" | A ranking, not a verdict; the board's own "they aren't verdicts" line is kept in frame |
+| 7 | "Ask what matters to you. Only the board re-runs" | True: `run_analysis` scores the board only |
+| 8 | "Export the transcript as .txt and the analysis as .md" | — |
+| 9 | End card: name, "Transcription and analysis that never leave your Mac", the three model/stack names, the repo URL, "English only · Apache 2.0" | Says English only |
+
+- **Length:** 70.9 s, inside 60–90 s, with nothing cut.
 
 ## Steps
 
 1. ~~Write and voice the meeting script, then tune it against the app until the board shows a spread (Demo audio).~~ **Done.**
 2. ~~Do the sharpness test take, and choose `record_video_dir` or screencast (Capture).~~ **Done:** neither; frame-grab at DSF 2.
 3. ~~Write the capture script with state-based waits and the timestamp log. Do three takes and keep the cleanest.~~ **Done.** Shots 3 and 4 were swapped after the first take (Storyboard).
-4. **Next:** write captions and check each one against "What the video must not claim".
-5. Cut the 16:9 version, then the 4:5 crop.
-6. Review on a phone, muted, before posting.
+4. ~~Write captions and check each one against "What the video must not claim".~~ **Done** (Edit and export, Captions).
+5. ~~Cut the 16:9 version, then the 4:5 crop.~~ **Done**, from take 4.
+6. **Next:** review on a phone, muted, before posting. This one is by hand.
 
 ## Open questions
 
