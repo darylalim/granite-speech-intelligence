@@ -20,15 +20,15 @@ What the video must not claim (each one is checked against CLAUDE.md before capt
 |---|------|------|-------------------|
 | 1 | 0–4 s | Title card over the app in its empty state, dark theme | "Meeting in. Transcript, summary and insights out. All on your Mac." |
 | 2 | 4–12 s | Drop `team_meeting.wav` on the uploader. The player and the filename caption appear | "Upload audio or video, or record from the mic" |
-| 3 | 12–20 s | Sidebar: turn on **Transcript analysis**. The questions expander appears under Transcribe and is opened briefly | "Ask your own yes/no questions" |
-| 4 | 20–28 s | Click **Transcribe**. The progress bar runs, the transcript card lands, then the "Transcription complete" toast | "Speech → text with Granite Speech 5.0, on device" |
+| 3 | 12–20 s | Click **Transcribe** with analysis still off. The transcript card lands, ten timestamped lines, then the "Transcription complete" toast | "Speech → text with Granite Speech 5.0, on device" |
+| 4 | 20–28 s | Sidebar: turn on **Transcript analysis**. The questions expander appears and is opened. Because a transcript already exists, the app offers **Analyse** instead of transcribing again; click it | "Add analysis and ask your own yes/no questions" |
 | 5 | 28–45 s | The analysis skeleton, then the Analysis card: zoom in on Topic, Summary and Action items | "Summary and action items by Granite 4.2 3B, also on device" |
 | 6 | 45–58 s | Zoom in on the question board, scrolling it slowly | "Questions ranked by how likely the answer is yes" |
 | 7 | 58–68 s | In the questions box, replace "Does the speaker mention a place?" with "Is a bug or problem discussed?" and click **Analyse**. Only the board refreshes, and the new question goes to the top | "Ask what matters to you. Only the board re-runs" |
 | 8 | 68–72 s | Hover over the two **Download** buttons | "Export as .txt and .md" |
 | 9 | 72–78 s | End card: app name, repo URL, model names, "MLX · Apple Silicon" | — |
 
-Shot 4 is the one that sells speed. The meeting transcribes in 0.56 s warm, so it needs no cut. Shot 5 includes the prefill, summary and board (3.0 s measured), so it fits uncut as well.
+Shot 3 is the one that sells speed. The meeting transcribes in 0.56 s warm, so it needs no cut. **Transcribe comes before analysis is turned on**, which reverses the first draft. With analysis on from the start, the app draws the analysis skeleton (~1,100 px) *above* the transcript card, by design, so the card lands below the fold and the transcription moment is never on screen (seen in the first full take). Turning analysis on afterwards is a real path through the app, and it shows one more feature: analysis never re-transcribes. Shot 5 includes the prefill, summary and board (3.0 s measured), so it fits uncut as well.
 
 Shot 7 does two jobs. It shows that the questions can be edited, and it removes the board's one misleading score: "place" scores 0.85 on a meeting that mentions no place (see Demo audio). Swapping it for a question the meeting is actually about is the honest fix, and it's what the feature is for.
 
@@ -98,7 +98,7 @@ The shot-7 replacement, "Is a bug or problem discussed?", scores **1.00**.
 
 Playwright (Python) runs in a scratchpad venv, never `uv add`, with Chrome as the browser, as in the A6 layout measurements.
 
-- **App:** a fresh `uv run streamlit run streamlit_app.py` on a fixed port. **Warm it first:** one full transcribe and analyse in a throwaway browser context, so both models are in `@st.cache_resource` and the take shows warm timings, not a 4 GB download. Clear the toasts by reloading before the take.
+- **App:** a fresh `uv run streamlit run streamlit_app.py --server.port 8599 --server.headless true --client.toolbarMode minimal`. The last flag removes the dev-mode "Deploy" button from the corner of every frame; it is a launch flag, so `.streamlit/config.toml` is unchanged. **Warm it first:** one full transcribe and analyse in a throwaway browser context, so both models are in `@st.cache_resource` and the take shows warm timings, not a 4 GB download. Clear the toasts by reloading before the take.
 - **Viewport:** 1470×900 with the sidebar open (input / transcript columns ~388 / 590 px, measured). That keeps the two-column grid readable on a phone after cropping. Dark theme via `color_scheme="dark"`.
 - **Sharpness: frame-grab at DSF 2.** Decided 2026-11-07 by test takes of the transcript card landing, compared with the card zoomed to fill a 1080-wide 4:5 frame (×1.94 from CSS px):
   - **(a) `record_video_dir`: rejected.** It records at CSS-pixel size (1470×900) whatever the `device_scale_factor`. Upscaled ×1.94 the text is visibly soft, and its low-bitrate VP8 (0.4 MB for ~8 s) adds ringing around the letters. It also needs Playwright's own `ffmpeg` download (`playwright install ffmpeg`).
@@ -112,7 +112,14 @@ Playwright (Python) runs in a scratchpad venv, never `uv add`, with Chrome as th
 - **Pacing:** the script owns the timing. It waits on app state, not on sleeps: the card subheader, the toast text, the board caption. It then holds for a fixed beat (1–1.5 s) after each state so viewers can read. Use `locator.hover()` before clicks so the motion reads as a person's. Playwright draws no cursor, so either inject a small CSS cursor dot that follows `mousemove`, or accept no cursor and rely on zooms.
 - **File input:** `set_input_files` on the uploader's `input[type=file]`. A drag-and-drop animation isn't worth faking.
 - **Determinism:** greedy decoding in both models and a pinned revision of each. The same WAV should produce the same transcript, summary and board on every take, so a retake changes timing only. If a take differs in content, find out why before re-cutting.
-- **Output:** one continuous take per run, plus a JSON log of timestamps for each state change (upload, toggle, click, card, toast, board). The edit uses the log to place captions and zooms without scrubbing.
+- **Output:** one continuous take per run, plus a JSON log of timestamps for each state change (upload, toggle, click, card, toast, board). The edit uses the log to place captions and zooms without scrubbing. Each event that a zoom targets also logs the element's box in CSS px (×2 for the master).
+- **The script, as built** (`capture_demo.py <take>`, scratchpad):
+  - A ring cursor injected with `add_init_script`. It follows real `mousemove` events and shrinks on `mousedown`.
+  - Mouse glides eased over ~0.7 s in real time; Playwright's own `steps=` fire as fast as they can, so the cursor would jump.
+  - Wheel scrolling in 40 px steps, because `scroll_into_view_if_needed` jumps.
+  - The question edit is a JS `setSelectionRange` over the old line, then typed at 45 ms a key, then committed with ⌘+Enter, which the text area's own hint shows on screen.
+- **Selectors that held** on Streamlit 1.66: keyed widgets through their `.st-key-<key>` class (`use_analysis`, `questions`, `transcribe`, `dl_md`, `dl_txt`); the visible uploader button as `[data-testid="stBaseButton-secondary"]` (`get_by_role("button")` also matches the hidden file input); a card as the innermost `stVerticalBlock` containing its heading (there is no `…BorderWrapper` test id any more); `.first` on the download buttons, where `.st-key-dl_md button` matches two.
+- **Takes, 2026-11-07:** three takes of 63.2–63.5 s, 18.6–18.9 fps, no failed captures, 6.9–7.2 MB each. Every event lands within 0.35 s across takes, and frames at the same event are pixel-identical apart from a toast mid-animation. So the takes are interchangeable; take 2 is the one to cut.
 
 ## Edit and export
 
@@ -131,8 +138,8 @@ Playwright (Python) runs in a scratchpad venv, never `uv add`, with Chrome as th
 
 1. ~~Write and voice the meeting script, then tune it against the app until the board shows a spread (Demo audio).~~ **Done.**
 2. ~~Do the sharpness test take, and choose `record_video_dir` or screencast (Capture).~~ **Done:** neither; frame-grab at DSF 2.
-3. **Next:** write the capture script with state-based waits and the timestamp log. Do three takes and keep the cleanest.
-4. Write captions and check each one against "What the video must not claim".
+3. ~~Write the capture script with state-based waits and the timestamp log. Do three takes and keep the cleanest.~~ **Done.** Shots 3 and 4 were swapped after the first take (Storyboard).
+4. **Next:** write captions and check each one against "What the video must not claim".
 5. Cut the 16:9 version, then the 4:5 crop.
 6. Review on a phone, muted, before posting.
 
